@@ -9,11 +9,12 @@ import os
 import signal
 import subprocess
 import sys
-import threading
 from typing import IO
 
 from .config import PROC_TERMINATE_GRACE_SEC
 from .errors import CaptureError
+
+_FORCE_GRACE_SEC = 0.25
 
 
 def _which(name: str) -> str | None:
@@ -21,8 +22,51 @@ def _which(name: str) -> str | None:
     return shutil.which(name)
 
 
+def _close_streams(proc: subprocess.Popen | None) -> None:
+    if not proc:
+        return
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+
+def _signal_process(proc: subprocess.Popen, *, force: bool) -> None:
+    """SIGTERM/SIGKILL — killpg 실패 시 proc.kill() 폴백."""
+    if proc.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            if force:
+                proc.kill()
+            else:
+                proc.terminate()
+            return
+        sig = signal.SIGKILL if force else signal.SIGTERM
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+        except ProcessLookupError:
+            pass
+        try:
+            if force:
+                proc.kill()
+            else:
+                proc.terminate()
+        except ProcessLookupError:
+            pass
+    except ProcessLookupError:
+        pass
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
 class ManagedProcess:
-    """단일 서브프로세스 — 종료 시 SIGTERM → wait → SIGKILL."""
+    """단일 서브프로세스 — 종료 시 파이프 해제 → SIGTERM → SIGKILL."""
 
     def __init__(
         self,
@@ -77,56 +121,44 @@ class ManagedProcess:
             return 0
         try:
             return self.proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
+        except subprocess.TimeoutExpired:
             self.terminate(force=True)
-            raise exc
+            raise
 
     def terminate(self, *, force: bool = False, grace_sec: float | None = None) -> None:
         proc = self.proc
         if not proc or proc.poll() is not None:
+            _close_streams(proc)
             self.proc = None
             return
-        grace = PROC_TERMINATE_GRACE_SEC if grace_sec is None else grace_sec
+
+        grace = (
+            _FORCE_GRACE_SEC if force
+            else (PROC_TERMINATE_GRACE_SEC if grace_sec is None else grace_sec)
+        )
+
+        # 파이프 read/write 블로킹 해제 — kill 전에 반드시 닫는다
+        _close_streams(proc)
+
+        _signal_process(proc, force=force)
         try:
-            if sys.platform == "win32":
-                if force:
-                    proc.kill()
-                else:
-                    proc.terminate()
-            else:
-                pgid = os.getpgid(proc.pid)
-                sig = signal.SIGKILL if force else signal.SIGTERM
-                os.killpg(pgid, sig)
             proc.wait(timeout=grace)
         except subprocess.TimeoutExpired:
+            _signal_process(proc, force=True)
             try:
-                if sys.platform == "win32":
-                    proc.kill()
-                else:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-            try:
-                proc.wait(timeout=1)
+                proc.wait(timeout=_FORCE_GRACE_SEC)
             except Exception:
                 pass
-        except ProcessLookupError:
-            pass
         except Exception:
             try:
                 proc.kill()
             except Exception:
                 pass
+            try:
+                proc.wait(timeout=_FORCE_GRACE_SEC)
+            except Exception:
+                pass
         finally:
-            for stream in (proc.stdout, proc.stderr, proc.stdin):
-                if stream:
-                    try:
-                        stream.close()
-                    except Exception:
-                        pass
             self.proc = None
 
     def read_stderr_tail(self, max_bytes: int = 4096) -> str:
@@ -140,7 +172,7 @@ class ManagedProcess:
 
 
 class ProcessPipeline:
-    """streamlink | ffmpeg 파이프라인 — 두 프로세스를 한 그룹으로 정리."""
+    """streamlink | ffmpeg 파이프라인 — 타임아웃 시 양쪽 프로세스 즉시 폐기."""
 
     def __init__(self, upstream: ManagedProcess, downstream: ManagedProcess):
         self.upstream = upstream
@@ -152,14 +184,28 @@ class ProcessPipeline:
         self.upstream.close_stdout_to_child()
         return self
 
+    def _finish_upstream(self) -> int:
+        """downstream 종료 후 upstream(streamlink) 즉시 정리 — 5초 대기 없음."""
+        if not self.upstream.proc:
+            return 0
+        if self.upstream.proc.poll() is None:
+            self.upstream.terminate(force=True)
+        try:
+            return self.upstream.wait(timeout=_FORCE_GRACE_SEC)
+        except subprocess.TimeoutExpired:
+            self.upstream.terminate(force=True)
+            return -9
+
     def wait(self, timeout: float | None = None) -> tuple[int, int]:
-        """downstream 종료 대기 후 upstream 정리. 타임아웃 시 전체 kill."""
+        """downstream 종료 대기 후 upstream 정리. 타임아웃 → CaptureError(stage=timeout)."""
         try:
             rc_down = self.downstream.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             self.terminate(force=True)
             raise CaptureError("캡처 타임아웃", stage="timeout")
-        rc_up = self.upstream.proc.wait(timeout=5) if self.upstream.proc else 0
+
+        rc_up = self._finish_upstream()
+
         err = self.downstream.read_stderr_tail() or self.upstream.read_stderr_tail()
         if rc_down != 0:
             raise CaptureError(f"ffmpeg 종료 코드 {rc_down}: {err[:200]}", stage="ffmpeg")
@@ -168,6 +214,12 @@ class ProcessPipeline:
         return rc_up, rc_down
 
     def terminate(self, *, force: bool = False) -> None:
+        # downstream(ffmpeg)이 upstream 파이프에서 블로킹될 수 있으므로 stdin 먼저 닫고 downstream부터 kill
+        if self.downstream.proc and self.downstream.proc.stdin:
+            try:
+                self.downstream.proc.stdin.close()
+            except Exception:
+                pass
         self.downstream.terminate(force=force)
         self.upstream.terminate(force=force)
 

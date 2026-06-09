@@ -83,9 +83,6 @@ class StreamCapture:
         pipeline.start()
         try:
             pipeline.wait(timeout=self.timeout_sec)
-        except subprocess.TimeoutExpired:
-            pipeline.terminate(force=True)
-            raise CaptureError(f"캡처 타임아웃({self.timeout_sec}s)", stage="timeout")
         except CaptureError:
             pipeline.terminate(force=True)
             raise

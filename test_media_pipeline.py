@@ -1,7 +1,9 @@
 """
 J.A.R.V.I.S — Media Pipeline 통합 테스트 (기존 스위트와 독립 실행)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-실행: .venv/bin/python test_media_pipeline.py
+실행:
+  .venv/bin/python test_media_pipeline.py
+  .venv/bin/python -m pytest test_media_pipeline.py -v
 
 검증:
   · URL SSRF 가드 + 리다이렉트 10회 상한
@@ -193,37 +195,45 @@ def test_worker_submit_and_events():
 
 
 def test_capture_timeout_kills_pipeline():
-    from media_pipeline.downloader import StreamCapture
     from media_pipeline.errors import CaptureError
     from media_pipeline.proc import ManagedProcess, ProcessPipeline
-    import shutil
+    import os as _os
+    import time
 
-    if not shutil.which("ffmpeg"):
-        print("⊘ capture timeout — ffmpeg 미설치, 스킵")
-        return
-
-    cap = StreamCapture(timeout_sec=1, max_seconds=60)
-
+    # downstream 20초 sleep — timeout=1 에서 반드시 CaptureError(stage=timeout)
     upstream = ManagedProcess(
         [sys.executable, "-c", "import time; time.sleep(20)"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     downstream = ManagedProcess(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
-         "-t", "60", "-vn", "-f", "null", "-"],
-        stdin=upstream.stdout_pipe,
-        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        [sys.executable, "-c", "import time; time.sleep(20)"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     pipeline = ProcessPipeline(upstream, downstream)
     pipeline.start()
-    upstream.close_stdout_to_child()
+    up_pid = upstream.pid
+    down_pid = downstream.pid
+    t0 = time.time()
     try:
         pipeline.wait(timeout=1)
         assert False, "타임아웃되어야 함"
     except CaptureError as e:
         assert e.stage == "timeout"
+        assert time.time() - t0 < 3.0, "타임아웃 kill이 3초 내 완료되어야 함"
+    except subprocess.TimeoutExpired:
+        assert False, "CaptureError(stage=timeout)가 전파되어야 함"
     finally:
         pipeline.terminate(force=True)
+
+    for label, pid in (("upstream", up_pid), ("downstream", down_pid)):
+        if pid:
+            try:
+                _os.kill(pid, 0)
+                assert False, f"{label} PID {pid} 가 아직 살아 있음"
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                pass
     print("✓ Capture timeout — 파이프라인 강제 종료")
 
 
