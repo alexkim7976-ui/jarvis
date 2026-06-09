@@ -79,6 +79,12 @@ from context_manager import get_context_window, append_exchange, context_turn_li
 from gemini_cache_manager import (
     get_cache_manager, log_gemini_usage, set_cache_logger, cache_enabled,
 )
+from alert_pipeline import create_jarvis_runtime, get_runtime, init_runtime
+from media_tools import (
+    MEDIA_TOOLS, execute_media_tool, set_media_runtime,
+    build_media_overlay_table, register_media_artifact, get_media_context_suffix,
+)
+from media_pipeline import create_media_runtime, init_media_runtime
 from stt_backend import resolve_stt_mode, shutdown_process_pool
 
 load_dotenv()
@@ -110,7 +116,7 @@ FACE_CHECK_INTERVAL=int(os.getenv("FACE_CHECK_INTERVAL","15"))
 PLAY_TIMEOUT=float(os.getenv("JARVIS_PLAY_TIMEOUT","180"))  # afplay 등 재생 프로세스 최대 대기(초)
 # 메인 루프 FPS — resource_profile.main_loop_fps() (LOW_MEM 기본 15, 일반 30)
 
-ALL_TOOLS = FILE_TOOLS + SEARCH_TOOLS + DISPLAY_TOOLS + FACE_TOOLS + WEATHER_TOOLS + SYSTEM_MONITOR_TOOLS + CALENDAR_TOOLS + MONITOR_TOOLS + STOCK_QUANT_TOOLS + NEWS_TOOLS + PORTFOLIO_TOOLS + BACKTEST_TOOLS + PRICE_ALERT_TOOLS + WHALE_TOOLS + SOCIAL_TOOLS + IR_TOOLS + STOCK_MONITOR_TOOLS + CAMPUS_TOOLS + SUPPLY_CHAIN_TOOLS + CROSSVAL_TOOLS
+ALL_TOOLS = FILE_TOOLS + SEARCH_TOOLS + DISPLAY_TOOLS + FACE_TOOLS + WEATHER_TOOLS + SYSTEM_MONITOR_TOOLS + CALENDAR_TOOLS + MONITOR_TOOLS + STOCK_QUANT_TOOLS + NEWS_TOOLS + PORTFOLIO_TOOLS + BACKTEST_TOOLS + PRICE_ALERT_TOOLS + WHALE_TOOLS + SOCIAL_TOOLS + IR_TOOLS + MEDIA_TOOLS + STOCK_MONITOR_TOOLS + CAMPUS_TOOLS + SUPPLY_CHAIN_TOOLS + CROSSVAL_TOOLS
 FILE_TOOL_NAMES    = {t["function"]["name"] for t in FILE_TOOLS}
 SEARCH_TOOL_NAMES  = {t["function"]["name"] for t in SEARCH_TOOLS}
 DISPLAY_TOOL_NAMES = {t["function"]["name"] for t in DISPLAY_TOOLS}
@@ -127,6 +133,7 @@ PRICE_ALERT_TOOL_NAMES = {t["function"]["name"] for t in PRICE_ALERT_TOOLS}
 WHALE_TOOL_NAMES = {t["function"]["name"] for t in WHALE_TOOLS}
 SOCIAL_TOOL_NAMES = {t["function"]["name"] for t in SOCIAL_TOOLS}
 IR_TOOL_NAMES = {t["function"]["name"] for t in IR_TOOLS}
+MEDIA_TOOL_NAMES = {t["function"]["name"] for t in MEDIA_TOOLS}
 STOCK_MONITOR_TOOL_NAMES = {t["function"]["name"] for t in STOCK_MONITOR_TOOLS}
 CAMPUS_TOOL_NAMES = {t["function"]["name"] for t in CAMPUS_TOOLS}
 SUPPLY_CHAIN_TOOL_NAMES = {t["function"]["name"] for t in SUPPLY_CHAIN_TOOLS}
@@ -194,6 +201,12 @@ def execute_any_tool(name, args):
                 log("TOOL", "주식 분석표 웹캠 오버레이 투사")
             except Exception as e:
                 log("WARN", f"오버레이 투사 실패: {e}")
+        _rt = get_runtime()
+        if _rt and result.get("success"):
+            try:
+                _rt.risk_feed.ingest_stock_tool_result(result)
+            except Exception as e:
+                log("WARN", f"Alert Pipeline risk ingest: {e}")
         return result
     if name in NEWS_TOOL_NAMES:
         result = execute_news_tool(name, args)
@@ -252,6 +265,15 @@ def execute_any_tool(name, args):
         return result
     if name in IR_TOOL_NAMES:
         return execute_ir_tool(name, args)
+    if name in MEDIA_TOOL_NAMES:
+        result = execute_media_tool(name, args)
+        if result.get("success") and result.get("overlay_table") and _OVERLAY_REF:
+            try:
+                _OVERLAY_REF.set_data(result["overlay_table"], 22, alert=False)
+                log("TOOL", "미디어 파이프라인 상태표 웹캠 오버레이 투사")
+            except Exception as e:
+                log("WARN", f"오버레이 투사 실패: {e}")
+        return result
     if name in STOCK_MONITOR_TOOL_NAMES:
         result = execute_stock_monitor_tool(name, args)
         if result.get("success") and result.get("overlay_table") and _OVERLAY_REF:
@@ -304,10 +326,11 @@ TOOLS:
 14. WHALE TRACKER: fetch_whale_trades, mirror_whale_portfolio, get_whale_tracker_status — 정치인/대가 거래·13F 포트폴리오 추적 및 가상 리밸런싱
 15. SOCIAL DETECTOR: analyze_social_trends, get_social_detector_status — Reddit 밈 주식 언급량 급증/거래량 스파이크/Gemini 위험도 분석
 16. IR INTERPRETER: start_ir_interpreter, stop_ir_interpreter, get_ir_interpreter_status — 라이브 IR 오디오 Whisper 한국어 통역/5분 Gemini 요약/HUD 보드
-17. STOCK MONITOR: add_stock_alert(ticker, condition_type, threshold) — 동적 주가 알림 등록, remove_stock_alert(alert_id), list_stock_alerts(), get_stock_monitor_status()
-18. CAMPUS AGENT: check_upcoming_academic_schedule(days) — 스토니브룩 학사 일정/수강신청·기숙사·등록금 데드라인 조회, refresh_campus_agent_status() — Gmail/캘린더 감시 무결성 점검
-19. SUPPLY CHAIN: analyze_supply_chain_impact(body_text, title, source) — 빅테크/에너지 뉴스→국내 반도체·에너지 밸류체인 인과관계 분석 (Java 백엔드); simulate_supply_chain_scenario(scenario_text) — LLM 추론 What-If, PRICE_SPIKE/REGULATORY/PHYSICAL_DISRUPTION 자동 분류 (Java 백엔드); simulate_structural_shock(shock_kind, origin_ticker, intensity?, duration_weeks?, target_country?) — 결정론 그래프 기반 충격 전파 시뮬, 인과 경로 명시 (로컬, 백엔드 불필요)
-20. MULTI-SOURCE CROSS-VALIDATION: analyze_stock_multi_source(query) — Yahoo Finance, Alpha Vantage, FMP, 한국투자증권, LS증권, 키움증권, Open DART 7개 채널 병렬 호출 → 주가·거래량·PER·PBR·시총 중앙값 기준 이상치(±1%/5%/10%) 제외 후 합의값 산출 → 음성 브리핑 문구 자동 생성
+17. MEDIA PIPELINE: submit_media_url(url, title?) — YouTube/라이브 URL 오디오 캡처+48k/16k WAV 전처리(악보 AI/GarageBand); get_media_pipeline_status — 워커·작업 상태; cancel_media_job(job_id) — 작업 취소
+18. STOCK MONITOR: add_stock_alert(ticker, condition_type, threshold) — 동적 주가 알림 등록, remove_stock_alert(alert_id), list_stock_alerts(), get_stock_monitor_status()
+19. CAMPUS AGENT: check_upcoming_academic_schedule(days) — 스토니브룩 학사 일정/수강신청·기숙사·등록금 데드라인 조회, refresh_campus_agent_status() — Gmail/캘린더 감시 무결성 점검
+20. SUPPLY CHAIN: analyze_supply_chain_impact(body_text, title, source) — 빅테크/에너지 뉴스→국내 반도체·에너지 밸류체인 인과관계 분석 (Java 백엔드); simulate_supply_chain_scenario(scenario_text) — LLM 추론 What-If, PRICE_SPIKE/REGULATORY/PHYSICAL_DISRUPTION 자동 분류 (Java 백엔드); simulate_structural_shock(shock_kind, origin_ticker, intensity?, duration_weeks?, target_country?) — 결정론 그래프 기반 충격 전파 시뮬, 인과 경로 명시 (로컬, 백엔드 불필요)
+21. MULTI-SOURCE CROSS-VALIDATION: analyze_stock_multi_source(query) — Yahoo Finance, Alpha Vantage, FMP, 한국투자증권, LS증권, 키움증권, Open DART 7개 채널 병렬 호출 → 주가·거래량·PER·PBR·시총 중앙값 기준 이상치(±1%/5%/10%) 제외 후 합의값 산출 → 음성 브리핑 문구 자동 생성
 
 ★ CAMPUS AGENT: 사용자가 "학사 일정 알려줘", "수강신청 언제야", "다가오는 데드라인 뭐 있어" → check_upcoming_academic_schedule(days=60).
   "캠퍼스 감시 상태", "스토니브룩 메일 감시 잘 돼?" → refresh_campus_agent_status.
@@ -330,6 +353,10 @@ TOOLS:
 ★ IR INTERPRETER: "이 유튜브 IR 라이브 통역 시작해줘", "테슬라 실적 발표 URL 통역해줘" → start_ir_interpreter(url, company).
   "IR 통역 멈춰" → stop_ir_interpreter. "IR 통역 상태 알려줘" → get_ir_interpreter_status.
   5분 요약 이벤트는 시스템이 HUD 우측 보드에 자동 투사하고, briefing을 음성 출력.
+
+★ MEDIA PIPELINE: "유튜브 라이브 오디오 따서 분석해 줘", "이 방송 악보 변환 준비해 줘", "스트리밍 URL 캡처해" → submit_media_url(url, title).
+  완료 시 시스템이 HUD에 전처리 결과표를 투사하고 briefing을 음성 출력. "미디어 파이프라인 상태" → get_media_pipeline_status.
+  IR 통역(실시간 자막)과 달리, 파일 덤프+48k/16k WAV 전처리(악보 AI/GarageBand용)가 목적이다.
 
 ★ SOCIAL DETECTOR: "레딧에서 밈 주식 급등 신호 있어?", "소셜 트렌드 분석해줘" → analyze_social_trends.
   결과 표(overlay_table)는 시스템이 경고 HUD로 자동 투사. 백그라운드 워커가 소셜 언급량 500% 이상 급증을 감시.
@@ -655,8 +682,8 @@ def _gaze_context_suffix():
 
 
 def _compose_system_prompt(extra=""):
-    """JARVIS_SYSTEM_PROMPT + 실시간 시선 컨텍스트 + 추가 지시(extra)를 합성."""
-    return JARVIS_SYSTEM_PROMPT + _gaze_context_suffix() + (extra or "")
+    """JARVIS_SYSTEM_PROMPT + 실시간 시선·미디어 컨텍스트 + 추가 지시(extra)를 합성."""
+    return JARVIS_SYSTEM_PROMPT + _gaze_context_suffix() + get_media_context_suffix() + (extra or "")
 
 
 def ask_jarvis_openai(text, client, history, pipeline=None):
@@ -1225,6 +1252,7 @@ def main():
                + (f" ({', '.join(SOCIAL_SUBREDDITS)}) {social_detector.interval}초 간격"
                   if social_detector.enabled else " — SOCIAL_SUBREDDITS 설정 필요"))
     log("INFO","IR 통역: 대기 (start_ir_interpreter 호출 시 streamlink/ffmpeg 사용)")
+    log("INFO","Media Pipeline: 대기 (submit_media_url 호출 시 streamlink/ffmpeg 캡처+전처리)")
     log("INFO",f"주가 감시: ON (동적 알림 {len(stock_monitor._rules)}개 등록됨 | {stock_monitor.interval}초 간격)")
     log("INFO",f"캠퍼스 감시(SBU): {'ON' if campus_agent.enabled else 'OFF'}"
                + (f" (Gmail/Calendar {campus_agent.interval}초 간격"
@@ -1619,6 +1647,33 @@ def main():
         except Exception as e:
             log("ERR", f"긴급 브리핑 오류: {e}")
 
+    # ── 실시간 위험·자산 분석 알림 파이프라인 (risk_engine + fds) ──
+    alert_rt = None
+    if os.getenv("ALERT_PIPELINE_ENABLED", "1").strip().lower() not in ("0", "false", "off"):
+        try:
+            alert_rt = init_runtime(create_jarvis_runtime(
+                overlay_fn=lambda table, dur, alert=False: overlay.set_data(table, dur, alert=alert),
+                push_fn=push_if_away,
+                logger=log,
+            ))
+            _ap_st = alert_rt.stats()
+            log("OK", f"🛡 Alert Pipeline ON — FDS={'ON' if alert_rt.fds_engine else 'OFF'} "
+                      f"| bridge_pending={_ap_st['bridge']['pending']}")
+        except Exception as e:
+            log("WARN", f"Alert Pipeline 초기화 실패: {e}")
+
+    # ── 외부 미디어 스트리밍·오디오 파싱 파이프라인 ──
+    media_rt = None
+    if os.getenv("MEDIA_PIPELINE_ENABLED", "1").strip().lower() not in ("0", "false", "off"):
+        try:
+            media_rt = init_media_runtime(create_media_runtime(logger=log))
+            set_media_runtime(media_rt)
+            _m_st = media_rt.stats()
+            log("OK", f"📡 Media Pipeline ON — queued={_m_st['worker'].get('queued', 0)}")
+        except Exception as e:
+            log("WARN", f"Media Pipeline 초기화 실패: {e}")
+            set_media_runtime(None)
+
     def play_interruptible(audio):
         """비스트리밍 재생 + 인터럽트 (폴백용).
         macOS에서는 VAD용 2번째 마이크 스트림이 CoreAudio 데드락을 유발하므로 재생만 수행."""
@@ -1982,6 +2037,61 @@ def main():
                 campus_agent.requeue(campus_events[idx:])
                 break
 
+        # ── Alert Pipeline (risk_engine + fds) — IDLE 시 TTS/AudioCue/push 1건 ──
+        if alert_rt:
+            for _cue in alert_rt.audio_cues.drain():
+                log("INFO", f"🎵 AudioCue motif={_cue.get('motif')} "
+                           f"intensity={_cue.get('intensity')} bpm={_cue.get('tempo_bpm')}")
+            _ap_can = (not spoke_this_cycle and state == "IDLE"
+                       and not player.is_playing and not tts_pipeline.is_playing)
+            _ap_out = alert_rt.poll_idle(
+                can_speak=_ap_can,
+                on_speak=lambda m: threading.Thread(target=speak_text, args=(m,), daemon=True).start(),
+                on_emergency=lambda m: threading.Thread(
+                    target=emergency_voice_briefing, args=(m,), daemon=True).start(),
+                on_push=push_if_away,
+            )
+            if _ap_out and _ap_can:
+                spoke_this_cycle = True
+                state = "SPEAKING"
+                if _ap_out.get("tts"):
+                    last_answer = _ap_out["tts"]
+                    chat_log.add("system", "🛡 위험·자산 알림")
+                    chat_log.add("jarvis", last_answer)
+
+        # ── Media Pipeline — 캡처·전처리 완료 HUD / 시스템 컨텍스트 / IDLE TTS ──
+        if media_rt:
+            for _mart in media_rt.drain_prep_queue():
+                register_media_artifact(_mart)
+            media_events = media_rt.get_events()
+            for idx, mevt in enumerate(media_events):
+                mtype = mevt.get("type", "")
+                meta = mevt.get("meta") or {}
+                if mtype == "media_ready":
+                    table = build_media_overlay_table(mevt)
+                    overlay.set_data(table, 28, alert=False)
+                    if mevt.get("artifact"):
+                        register_media_artifact(mevt["artifact"])
+                    _mtitle = meta.get("title") or "미디어"
+                    _mbrief = (
+                        f"선생님, '{_mtitle}' 오디오 전처리가 완료되었습니다. "
+                        f"악보 변환이나 보컬 분석을 진행할 수 있습니다."
+                    )
+                    if (not spoke_this_cycle and state == "IDLE"
+                            and not player.is_playing and not tts_pipeline.is_playing):
+                        log("INFO", f"🎵 Media ready: {mevt.get('job_id')}")
+                        last_answer = _mbrief
+                        chat_log.add("system", f"🎵 미디어 전처리 완료 — {mevt.get('job_id')}")
+                        chat_log.add("jarvis", _mbrief)
+                        state = "SPEAKING"
+                        spoke_this_cycle = True
+                        threading.Thread(target=speak_text, args=(_mbrief,), daemon=True).start()
+                    else:
+                        media_rt.requeue(media_events[idx:])
+                        break
+                elif mtype == "media_failed":
+                    log("WARN", f"Media job failed: {mevt.get('message', '')[:120]}")
+
         # ── 선제적 매크로 가드레일 위험 브리핑 (요청 없이 먼저 말 걸기) ──
         macro_events = macro_guard.get_events()
         for idx, gevt in enumerate(macro_events):
@@ -2283,6 +2393,9 @@ def main():
     whale_tracker.stop()
     social_detector.stop()
     ir_interpreter.stop()
+    if media_rt:
+        media_rt.stop()
+        set_media_runtime(None)
     stock_monitor.stop()
     campus_agent.stop()
     macro_guard.stop()
