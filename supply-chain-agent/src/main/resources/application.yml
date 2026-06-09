@@ -1,0 +1,35 @@
+server:
+  # HTTPS 표준 보안 포트(8443). 평문 HTTP가 필요하면 SUPPLY_CHAIN_PORT=8080 + SSL_ENABLED=false.
+  port: ${SUPPLY_CHAIN_PORT:8443}
+  # 기본적으로 로컬호스트에만 바인딩 → LAN 외부 노출 차단 (SUPPLY_CHAIN_BIND=0.0.0.0 로만 개방 가능)
+  address: ${SUPPLY_CHAIN_BIND:127.0.0.1}
+  ssl:
+    # 로컬 TLS 암호화. 키스토어/비밀번호는 supply_chain_server.py가 기동 시 자동 생성·주입.
+    # 인증서 자산이 없으면 SUPPLY_CHAIN_SSL_ENABLED=false 로 평문 폴백 가능.
+    enabled: ${SUPPLY_CHAIN_SSL_ENABLED:false}
+    key-store: ${SUPPLY_CHAIN_KEYSTORE:}
+    key-store-password: ${SUPPLY_CHAIN_KEYSTORE_PASSWORD:}
+    key-store-type: ${SUPPLY_CHAIN_KEYSTORE_TYPE:PKCS12}
+    key-alias: ${SUPPLY_CHAIN_KEY_ALIAS:supplychain}
+    # TLS 1.2/1.3만 허용 (구버전 프로토콜 차단)
+    enabled-protocols: TLSv1.3,TLSv1.2
+
+spring:
+  application:
+    name: supply-chain-agent
+
+supply-chain:
+  security:
+    # 공유 시크릿. 설정 시 /health 외 모든 엔드포인트에 X-API-Key 헤더 필요.
+    api-key: ${SUPPLY_CHAIN_API_KEY:}
+  gemini:
+    api-key: ${GEMINI_API_KEY:}
+    model: ${GEMINI_MODEL:gemini-2.5-flash}
+    max-input-chars: 24000
+  storage:
+    # firestore | memory (Firestore 미설정 시 memory로 자동 폴백)
+    mode: ${SUPPLY_CHAIN_STORAGE:firestore}
+  firestore:
+    project-id: ${FIRESTORE_PROJECT_ID:}
+    collection-source-documents: source_documents
+    collection-analysis-results: supply_chain_analyses

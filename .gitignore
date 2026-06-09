@@ -1,0 +1,63 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  JARVIS — 보안 .gitignore
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# API 키 / 환경변수
+.env
+.env.*
+!.env.example
+
+# OAuth 토큰 / 인증
+.credentials/
+credentials.json
+token.json
+campus_token.json
+*.pem
+*.key
+*.p12
+
+# 로컬 TLS 인증서 자산 (자동 생성, 절대 커밋 금지)
+.certs/
+*.crt
+*.jks
+keystore.pass
+
+# JARVIS Link 자동발급 접속 토큰 (0600, 절대 커밋 금지)
+.jarvis_link_token
+
+# Google 서비스 계정 키 (Firestore)
+*serviceAccount*.json
+*-firebase-adminsdk-*.json
+service-account*.json
+
+# 파일 시스템 샌드박스 (격리 작업 공간, 런타임 생성)
+data/sandbox/
+
+# 개인 데이터
+portfolio.json
+stock_monitor_rules.json
+voice_profile/
+faces/
+audio_cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 로그 / 캐시
+*.log
+.logs/
+.cache/
+.mplcache/

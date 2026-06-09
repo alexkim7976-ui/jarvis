@@ -1,0 +1,55 @@
+rules_version = '2';
+
+// ════════════════════════════════════════════════════════════════════
+//  J.A.R.V.I.S Supply Chain Agent — Firestore 최소 권한 보안 규칙
+// ════════════════════════════════════════════════════════════════════
+//  목적: 공급망 데이터 컬렉션 외의 "임의 읽기/쓰기"를 전면 차단한다.
+//
+//  중요(아키텍처):
+//   - Java 백엔드는 Google 서비스 계정(Admin SDK)으로 Firestore에 접근한다.
+//     Admin SDK는 보안 규칙을 "우회"하므로, 정상 서버 경로는 이 규칙의 영향을
+//     받지 않고 계속 동작한다.
+//   - 이 규칙은 서비스 계정 키가 아닌 "클라이언트 SDK(웹/모바일/유출 토큰)"의
+//     직접 접근을 막기 위한 방어선이다. 따라서 기본값은 전면 거부이며,
+//     서버가 다루는 두 컬렉션만 인증된 주체에 한해 제한적으로 허용한다.
+//
+//  배포:
+//     firebase deploy --only firestore:rules
+// ════════════════════════════════════════════════════════════════════
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 인증된 주체인지 확인하는 헬퍼
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // 문서 본문이 과도하게 크지 않은지(남용 방지) 등 최소한의 형식 가드
+    function isReasonableSize() {
+      return request.resource.size() < 1048576; // 1MB 상한
+    }
+
+    // ── 1) 공급망 원문 문서 컬렉션 ──────────────────────────────
+    //  application.yml: collection-source-documents: source_documents
+    match /source_documents/{docId} {
+      allow read:  if isSignedIn();
+      allow create, update: if isSignedIn() && isReasonableSize();
+      allow delete: if false;  // 클라이언트 삭제 금지 (감사/무결성 보존)
+    }
+
+    // ── 2) 공급망 분석 결과 컬렉션 ──────────────────────────────
+    //  application.yml: collection-analysis-results: supply_chain_analyses
+    match /supply_chain_analyses/{analysisId} {
+      allow read:  if isSignedIn();
+      // 분석 결과는 백엔드(Admin SDK)만 기록한다. 클라이언트 쓰기는 금지.
+      allow write: if false;
+    }
+
+    // ── 3) 그 외 모든 경로 — 전면 거부 (Deny by default) ────────
+    //  위에 명시된 J.A.R.V.I.S 공급망 컬렉션 외의 임의 읽기/쓰기를 차단.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

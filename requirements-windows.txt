@@ -1,0 +1,38 @@
+# J.A.R.V.I.S — Windows용 Python 의존성 (install.ps1 / install.bat)
+# face-recognition(dlib)은 Windows에서 빌드 도구가 필요해 별도 설치 — 얼굴 인식 없이도 실행 가능
+
+# ── 컴퓨터 비전 & 손동작 ──
+opencv-python>=4.9.0
+mediapipe>=0.10.14
+numpy>=1.26.0
+
+# ── 오디오 ──
+pyaudio>=0.2.14
+faster-whisper>=1.0.0
+
+# ── LLM / AI ──
+openai>=1.40.0
+google-generativeai>=0.7.0
+
+# ── HTTP / 환경 ──
+requests>=2.31.0
+python-dotenv>=1.0.0
+keyring>=25.0.0
+
+# ── 이미지 (얼굴 인식 폴백 UI) ──
+Pillow>=10.0.0
+
+# ── 금융 / 데이터 ──
+pandas>=2.0.0
+matplotlib>=3.8.0
+yfinance>=0.2.40
+# 국내 외인/기관/개인 수급(매트릭스 KR 레이어)은 네이버 금융 스크레이프 사용 (requests/pandas로 충분, 추가 패키지 없음)
+# ※ pykrx는 1.0.51에서 투자자 엔드포인트가 깨져 있어 제외
+
+# ── Google (캠퍼스 Gmail/Calendar) ──
+google-auth-oauthlib>=1.0.0
+google-api-python-client>=2.100.0
+
+# ── 백그라운드 모니터 ──
+google-play-scraper>=1.2.0
+beautifulsoup4>=4.12.0
