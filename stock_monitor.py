@@ -388,43 +388,92 @@ class StockMonitor:
             "alert_text": alert_text,
         }
 
-        # ── 2단계: 뉴스 컨텍스트 수집 + Gemini 원인 요약 (백그라운드 스레드 내 실행) ──
-        # 메인 루프(OpenCV/마이크)는 절대 블로킹하지 않음 — 완료 후 큐에 push
+        # ── 2단계: Local Rule-Engine First → 임계치 통과 시에만 Gemini ──
+        gemini_called = False
+        local_snapshot = None
+        local_anomaly = False
+        routing = "legacy"
         headlines: list[dict] = []
-        news_ctx = _fetch_news_context(rule.ticker, rule.name,
-                                        change_pct, price, is_krw)
-        if news_ctx and news_ctx.get("success"):
-            headlines = news_ctx.get("headlines", [])
-            summary   = news_ctx.get("summary", "")
-            from news_scraper import FALLBACK_SUMMARY
-            has_real_summary = bool(summary) and summary != FALLBACK_SUMMARY
+        route = None
 
-            if has_real_summary:
-                # 자비스 원인 분석형 대사로 업그레이드
-                if rule.condition_type == "change_pct_down":
-                    base_msg = (
-                        f"선생님, {rule.name}{ptc} 현재 전일 대비 "
-                        f"{abs(change_pct):.1f}% 급락 중입니다. "
-                        f"AI 분석 결과, {summary} 관련 뉴스가 주요 원인으로 포착되었습니다. "
-                        f"현재가 {price_s}입니다."
-                    )
-                elif rule.condition_type == "change_pct_up":
-                    base_msg = (
-                        f"선생님, {rule.name}{ptc} 현재 전일 대비 "
-                        f"{change_pct:.1f}% 급등 중입니다. "
-                        f"AI 분석 결과, {summary} 관련 뉴스가 주요 배경으로 포착되었습니다. "
-                        f"현재가 {price_s}입니다."
-                    )
-                else:
-                    base_msg = f"{base_msg} AI 분석: {summary}"
+        try:
+            from local_rule_engine import CostAwareRouter, get_config as _lre_cfg
+            if _lre_cfg().enabled:
+                route = CostAwareRouter().route_alert(
+                    rule.ticker, rule.name,
+                    change_pct=change_pct, price=price, rule_triggered=True,
+                )
+                routing = route.routing
+                local_snapshot = route.local_snapshot.as_dict() if route.local_snapshot else None
+                local_anomaly = bool(route.local_snapshot and route.local_snapshot.anomaly.triggered)
+                gemini_called = route.gemini_called
+                headlines = list(route.headlines or [])
 
-                # HUD overlay_table 에 AI 원인 요약 행 추가
-                overlay_table["rows"].append(["AI 원인 요약", summary[:45], "🧠"])
-                _log("OK", f"뉴스 컨텍스트 합성 완료 ({rule.ticker}) → {summary[:40]}")
+                if route.overlay_rows:
+                    overlay_table["headers"] = ["항목", "값", "신호"]
+                    overlay_table["rows"].extend(route.overlay_rows)
+
+                if route.gemini_summary:
+                    if rule.condition_type == "change_pct_down":
+                        base_msg = (
+                            f"선생님, {rule.name}{ptc} 현재 전일 대비 "
+                            f"{abs(change_pct):.1f}% 급락 중입니다. "
+                            f"AI 분석 결과, {route.gemini_summary} 관련 뉴스가 주요 원인으로 포착되었습니다. "
+                            f"현재가 {price_s}입니다."
+                        )
+                    elif rule.condition_type == "change_pct_up":
+                        base_msg = (
+                            f"선생님, {rule.name}{ptc} 현재 전일 대비 "
+                            f"{change_pct:.1f}% 급등 중입니다. "
+                            f"AI 분석 결과, {route.gemini_summary} 관련 뉴스가 주요 배경으로 포착되었습니다. "
+                            f"현재가 {price_s}입니다."
+                        )
+                    else:
+                        base_msg = f"{base_msg} AI 분석: {route.gemini_summary}"
+                    _log("OK", f"Cost-Aware Gemini ({rule.ticker}) → {route.gemini_summary[:40]}")
+                elif route.message_suffix and route.routing == "local_only":
+                    base_msg = f"{base_msg}{route.message_suffix}"
+                    _log("INFO", f"로컬 전용 알림 — Gemini 0회 ({rule.ticker})")
             else:
-                _log("INFO", f"뉴스 요약 없음 — 기본 메시지 사용 ({rule.ticker})")
-        else:
-            _log("INFO", f"뉴스 컨텍스트 미수집 — 기본 메시지 사용 ({rule.ticker})")
+                route = None
+        except ImportError:
+            route = None
+
+        if routing == "legacy":
+            # 폴백: local_rule_engine 미사용 시 기존 news_scraper 경로
+            headlines = []
+            news_ctx = _fetch_news_context(rule.ticker, rule.name,
+                                            change_pct, price, is_krw)
+            if news_ctx and news_ctx.get("success"):
+                headlines = news_ctx.get("headlines", [])
+                summary   = news_ctx.get("summary", "")
+                from news_scraper import FALLBACK_SUMMARY
+                has_real_summary = bool(summary) and summary != FALLBACK_SUMMARY
+                gemini_called = has_real_summary
+
+                if has_real_summary:
+                    if rule.condition_type == "change_pct_down":
+                        base_msg = (
+                            f"선생님, {rule.name}{ptc} 현재 전일 대비 "
+                            f"{abs(change_pct):.1f}% 급락 중입니다. "
+                            f"AI 분석 결과, {summary} 관련 뉴스가 주요 원인으로 포착되었습니다. "
+                            f"현재가 {price_s}입니다."
+                        )
+                    elif rule.condition_type == "change_pct_up":
+                        base_msg = (
+                            f"선생님, {rule.name}{ptc} 현재 전일 대비 "
+                            f"{change_pct:.1f}% 급등 중입니다. "
+                            f"AI 분석 결과, {summary} 관련 뉴스가 주요 배경으로 포착되었습니다. "
+                            f"현재가 {price_s}입니다."
+                        )
+                    else:
+                        base_msg = f"{base_msg} AI 분석: {summary}"
+                    overlay_table["rows"].append(["AI 원인 요약", summary[:45], "🧠"])
+                    _log("OK", f"뉴스 컨텍스트 합성 완료 ({rule.ticker}) → {summary[:40]}")
+                else:
+                    _log("INFO", f"뉴스 요약 없음 — 기본 메시지 사용 ({rule.ticker})")
+            else:
+                _log("INFO", f"뉴스 컨텍스트 미수집 — 기본 메시지 사용 ({rule.ticker})")
 
         message = base_msg
 
@@ -440,13 +489,30 @@ class StockMonitor:
             "message":       message,
             "alert_text":    alert_text,
             "overlay_table": overlay_table,
-            "headlines":     headlines,          # 뉴스 헤드라인 (chat_log 표시용)
-            "news_summary":  news_ctx.get("summary", "") if news_ctx else "",
+            "headlines":     headlines,
+            "news_summary":  (route.gemini_summary if route and getattr(route, "gemini_summary", "") else ""),
+            "routing":       routing,
+            "gemini_called": gemini_called,
+            "local_anomaly": local_anomaly,
+            "local_snapshot": local_snapshot,
             "timestamp":     datetime.now().isoformat(),
         }
         with self._lock:
             self._event_q.append(evt)
-        _log("ALERT", f"{rule.name}: {cond_label} 발동 | 변화율={change_pct:+.2f}%, 현재가={price_s}")
+
+        # alert_pipeline 연동 (로컬 특이점 → EventBridge)
+        if local_anomaly:
+            try:
+                from alert_pipeline import get_runtime
+                from local_rule_engine.alert_bridge import push_local_anomaly_to_pipeline
+                _rt = get_runtime()
+                if _rt:
+                    push_local_anomaly_to_pipeline(_rt, evt)
+            except Exception:
+                pass
+
+        _log("ALERT", f"{rule.name}: {cond_label} 발동 | 변화율={change_pct:+.2f}%, 현재가={price_s}"
+                      f" | routing={routing} gemini={gemini_called}")
 
     # ── 조건 평가 ──
     def _evaluate(self, rule: AlertRule, change_pct: float, price: float) -> bool:
