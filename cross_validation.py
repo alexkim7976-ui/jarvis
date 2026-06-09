@@ -831,6 +831,11 @@ def refresh_market_snapshot_cache(
             upsert_snapshot(snap.to_dict())
         except ImportError:
             pass
+    try:
+        from local_intelligence import refresh_local_analysis_report
+        refresh_local_analysis_report(query, timeout=timeout)
+    except Exception:
+        pass
     return snap
 
 
@@ -1038,6 +1043,14 @@ def execute_crossval_tool(name: str, arguments) -> dict:
         q = (arguments or {}).get("query", "").strip()
         if not q:
             return {"success": False, "message": "조회할 종목명을 알려주세요."}
+        try:
+            from hybrid_router import try_local_tool_execution, hybrid_routing_enabled
+            if hybrid_routing_enabled():
+                local = try_local_tool_execution(name, arguments)
+                if local is not None:
+                    return local
+        except ImportError:
+            pass
         return analyze_stock(q)
     return {"success": False, "message": f"알 수 없는 도구: {name}"}
 

@@ -80,6 +80,10 @@ from gemini_cache_manager import (
     get_cache_manager, log_gemini_usage, set_cache_logger, cache_enabled,
     inject_market_snapshot_into_user_message,
 )
+from hybrid_router import (
+    ask_with_hybrid_routing, hybrid_routing_enabled, note_tool_invocation,
+    set_router_logger, try_local_tool_execution,
+)
 from alert_pipeline import create_jarvis_runtime, get_runtime, init_runtime
 from media_tools import (
     MEDIA_TOOLS, execute_media_tool, set_media_runtime,
@@ -173,6 +177,18 @@ def execute_any_tool(name, args):
         write_audit_log("OUTBOUND_GUARD", f"tool={name} 차단 사유={o_reason}")
         return {"success": False, "message": f"보안 차단(출력 가드레일): {o_reason}"}
     audit_tool_call(name, args)
+
+    try:
+        note_tool_invocation(name)
+    except Exception:
+        pass
+
+    try:
+        local_result = try_local_tool_execution(name, args)
+        if local_result is not None:
+            return local_result
+    except Exception:
+        pass
 
     if name in FILE_TOOL_NAMES:    return execute_file_tool(name, args)
     if name in SEARCH_TOOL_NAMES:
@@ -990,7 +1006,7 @@ def _injection_refusal(text, pipeline=None):
 
 
 def ask_jarvis_streaming(text, oc, history, pipeline):
-    """스트리밍 TTS 파이프라인과 연동된 LLM 호출 (Gemini 실패 시 Ollama 폴백)"""
+    """스트리밍 TTS 파이프라인과 연동된 LLM 호출 (Hybrid Routing + Gemini/Ollama 폴백)"""
     log("INFO",f"LLM({LLM_PROVIDER}) 스트리밍...")
     refusal = _injection_refusal(text, pipeline)
     if refusal is not None:
@@ -999,7 +1015,15 @@ def ask_jarvis_streaming(text, oc, history, pipeline):
     if LLM_PROVIDER=="gemini":
         if not GEMINI_API_KEY: return "Gemini 키 없음"
         try:
-            a=ask_jarvis_gemini(text,history,pipeline)
+            if hybrid_routing_enabled():
+                a = ask_with_hybrid_routing(
+                    text, history, pipeline,
+                    gemini_fn=ask_jarvis_gemini,
+                    ollama_fn=ask_jarvis_ollama,
+                    check_ollama=_check_ollama,
+                )
+            else:
+                a=ask_jarvis_gemini(text,history,pipeline)
         except Exception as e:
             log("WARN",f"Gemini 실패 → Ollama 폴백: {e}")
             if _check_ollama():
@@ -1014,7 +1038,7 @@ def ask_jarvis_streaming(text, oc, history, pipeline):
 
 
 def ask_jarvis(text, oc, history):
-    """비스트리밍 (도구 전용 / 폴백) — Gemini 실패 시 Ollama 폴백"""
+    """비스트리밍 (도구 전용 / 폴백) — Hybrid Routing + Gemini/Ollama 폴백"""
     log("INFO",f"LLM({LLM_PROVIDER})...")
     refusal = _injection_refusal(text)
     if refusal is not None:
@@ -1022,7 +1046,15 @@ def ask_jarvis(text, oc, history):
     text = _apply_cv_cache_to_user_text(text, history)
     if LLM_PROVIDER=="gemini":
         try:
-            a=ask_jarvis_gemini(text,history)
+            if hybrid_routing_enabled():
+                a = ask_with_hybrid_routing(
+                    text, history, None,
+                    gemini_fn=lambda t, h, p: ask_jarvis_gemini(t, h, p),
+                    ollama_fn=lambda t, h, p: ask_jarvis_ollama(t, h, p),
+                    check_ollama=_check_ollama,
+                )
+            else:
+                a=ask_jarvis_gemini(text,history)
         except Exception as e:
             log("WARN",f"Gemini 실패 → Ollama 폴백: {e}")
             if _check_ollama():
@@ -1193,6 +1225,7 @@ def main():
     if LLM_PROVIDER=="gemini" and not GEMINI_API_KEY: log("ERR","GEMINI_API_KEY 필요"); sys.exit(1)
 
     set_cache_logger(log)
+    set_router_logger(log)
     if LLM_PROVIDER == "gemini" and cache_enabled():
         def _warm_gemini_cache():
             try:
