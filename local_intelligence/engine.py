@@ -48,6 +48,10 @@ class LocalAnalysisReport:
     local_matrix: dict = field(default_factory=dict)
     dcf_valuation: dict = field(default_factory=dict)
     graham_valuation: dict = field(default_factory=dict)
+    sentiment_golden_cross: bool = False
+    sentiment_divergence_signal: str = ""
+    sentiment_ma5: float | None = None
+    sentiment_ma20: float | None = None
     metrics_snapshot: dict = field(default_factory=dict)
     timestamp: float = 0.0
 
@@ -73,6 +77,10 @@ class LocalAnalysisReport:
             "local_matrix": self.local_matrix,
             "dcf_valuation": self.dcf_valuation,
             "graham_valuation": self.graham_valuation,
+            "sentiment_golden_cross": self.sentiment_golden_cross,
+            "sentiment_divergence_signal": self.sentiment_divergence_signal,
+            "sentiment_ma5": self.sentiment_ma5,
+            "sentiment_ma20": self.sentiment_ma20,
             "local_matrix_score": self.local_matrix.get("local_matrix_score"),
             "local_matrix_grade": self.local_matrix.get("grade"),
             "metrics_snapshot": self.metrics_snapshot,
@@ -148,6 +156,26 @@ def gather_fusion_context(query: str, *, timeout: float = 12.0) -> dict[str, Any
     dcf_valuation = (lre_snap.dcf_valuation if lre_snap else {}) or {}
     graham_valuation = (lre_snap.graham_valuation if lre_snap else {}) or {}
 
+    price_closes = None
+    try:
+        if lre_snap and lre_snap.tech_values:
+            from stock_quant import fetch_stock_data
+            df, _, err = fetch_stock_data(ticker, period="2mo")
+            if df is not None and not df.empty and not err:
+                price_closes = df["Close"]
+    except Exception:
+        price_closes = None
+
+    sentiment_momentum: dict = {}
+    try:
+        from local_rule_engine.sentiment_momentum import analyze_sentiment_momentum
+        if market_snap and market_snap.sentiment_score is not None:
+            from cross_validation import record_sentiment_observation
+            record_sentiment_observation(ticker, int(market_snap.sentiment_score))
+        sentiment_momentum = analyze_sentiment_momentum(ticker, price_closes=price_closes)
+    except Exception:
+        sentiment_momentum = {}
+
     return {
         "ticker": ticker,
         "query": query,
@@ -186,6 +214,19 @@ def gather_fusion_context(query: str, *, timeout: float = 12.0) -> dict[str, Any
         "local_matrix": local_matrix,
         "dcf_valuation": dcf_valuation,
         "graham_valuation": graham_valuation,
+        "sentiment_ma5": sentiment_momentum.get("sentiment_ma5") or (
+            market_snap.sentiment_ma5 if market_snap else None
+        ),
+        "sentiment_ma20": sentiment_momentum.get("sentiment_ma20") or (
+            market_snap.sentiment_ma20 if market_snap else None
+        ),
+        "sentiment_golden_cross": bool(sentiment_momentum.get("sentiment_golden_cross")),
+        "sentiment_divergence_signal": str(
+            sentiment_momentum.get("sentiment_divergence_signal") or ""
+        ),
+        "sentiment_momentum_signal": str(
+            sentiment_momentum.get("sentiment_momentum_signal") or ""
+        ),
         "local_matrix_score": local_matrix.get("local_matrix_score"),
         "local_matrix_grade": local_matrix.get("grade"),
         "anomaly_flag": bool(
@@ -203,6 +244,8 @@ def build_compact_context(ctx: dict[str, Any]) -> str:
     mx = ctx.get("local_matrix") or {}
     dcf = ctx.get("dcf_valuation") or {}
     gr = ctx.get("graham_valuation") or {}
+    sm5 = ctx.get("sentiment_ma5")
+    sm20 = ctx.get("sentiment_ma20")
 
     lines = [
         f"종목: {ctx.get('name')}({ctx.get('ticker')})",
@@ -211,6 +254,14 @@ def build_compact_context(ctx: dict[str, Any]) -> str:
         f"RSI: {ctx.get('rsi', 0):.0f} | hybrid: {ctx.get('hybrid_score')}/100",
         f"BB스퀴즈: {'Y' if ctx.get('bb_squeeze') else 'N'} | 뉴스감성: {ctx.get('sentiment_score', 0):+d}",
     ]
+    if sm5 is not None and sm20 is not None:
+        lines.append(
+            f"감성MA5={sm5:+.1f} MA20={sm20:+.1f} "
+            f"골든크로스={'Y' if ctx.get('sentiment_golden_cross') else 'N'}"
+        )
+    div = (ctx.get("sentiment_divergence_signal") or "").strip()
+    if div:
+        lines.append(f"감성다이버전스: {div[:80]}")
     if vp.get("poc"):
         lines.append(
             f"매물대 POC={vp.get('poc')} 지지={vp.get('support')} 저항={vp.get('resistance')} | {vp.get('signal', '')[:50]}"
@@ -287,6 +338,17 @@ def build_rule_based_narrative(ctx: dict[str, Any]) -> str:
             f" 그레이엄 내재가치 ${gr['intrinsic_value']:.2f}입니다."
         )
 
+    sent_txt = ""
+    if ctx.get("sentiment_golden_cross") and ctx.get("sentiment_divergence_signal"):
+        sent_txt = (
+            " 현재 주가는 바닥을 기고 있으나 뉴스 심리 모멘텀은 먼저 골든크로스를 그리며 "
+            f"{ctx['sentiment_divergence_signal']}를 보이고 있습니다."
+        )
+    elif ctx.get("sentiment_golden_cross"):
+        sent_txt = " 뉴스 감성 MA5가 MA20을 상방 돌파하는 골든크로스가 확인됩니다."
+    elif ctx.get("sentiment_divergence_signal"):
+        sent_txt = f" {ctx['sentiment_divergence_signal']}."
+
     price = ctx.get("consensus_price")
     cp = ctx.get("change_pct")
     price_txt = f"합의가 {price}" if price else "가격 제한"
@@ -297,7 +359,7 @@ def build_rule_based_narrative(ctx: dict[str, Any]) -> str:
         f"{trend}. {vp_txt}. "
         f"재무 안정성(밸류에이션) 점수는 {val_score}점({val_grade})이며, "
         f"로컬 종합 매트릭스 점수는 {matrix}/100({mx.get('grade', 'HOLD')})입니다."
-        f"{dcf_txt}{gr_txt}"
+        f"{dcf_txt}{gr_txt}{sent_txt}"
     )
 
 
@@ -311,6 +373,7 @@ _OLLAMA_NARRATIVE_PROMPT = """당신은 Apple Silicon 로컬 퀀트 애널리스
 4) 로컬 종합 매트릭스 점수
 5) DCF 적정 주가 및 안전마진(%)
 6) 그레이엄 내재가치 및 저평가율(%)
+7) 뉴스 감성 MA5/MA20, 골든크로스, 강세 다이버전스
 
 규칙:
 - '선생님,'으로 시작
@@ -393,6 +456,10 @@ def refresh_local_analysis_report(
         "local_matrix_score": ctx.get("local_matrix_score"),
         "local_matrix_grade": ctx.get("local_matrix_grade"),
         "sentiment_score": ctx.get("sentiment_score"),
+        "sentiment_ma5": ctx.get("sentiment_ma5"),
+        "sentiment_ma20": ctx.get("sentiment_ma20"),
+        "sentiment_golden_cross": ctx.get("sentiment_golden_cross"),
+        "sentiment_divergence_signal": ctx.get("sentiment_divergence_signal"),
     }
 
     rep = LocalAnalysisReport(
@@ -416,6 +483,10 @@ def refresh_local_analysis_report(
         local_matrix=dict(ctx.get("local_matrix") or {}),
         dcf_valuation=dict(ctx.get("dcf_valuation") or {}),
         graham_valuation=dict(ctx.get("graham_valuation") or {}),
+        sentiment_golden_cross=bool(ctx.get("sentiment_golden_cross")),
+        sentiment_divergence_signal=str(ctx.get("sentiment_divergence_signal") or ""),
+        sentiment_ma5=ctx.get("sentiment_ma5"),
+        sentiment_ma20=ctx.get("sentiment_ma20"),
         metrics_snapshot=metrics_snapshot,
         timestamp=time.time(),
     )

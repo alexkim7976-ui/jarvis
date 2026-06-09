@@ -628,6 +628,8 @@ class MarketSnapshot:
     compact_digest: str
     sources_ok: list[str]
     sentiment_score: int = 0
+    sentiment_ma5: float | None = None
+    sentiment_ma20: float | None = None
     timestamp: float = 0.0
 
     def to_dict(self) -> dict:
@@ -643,6 +645,8 @@ class MarketSnapshot:
             "compact_digest": self.compact_digest,
             "sources_ok": self.sources_ok,
             "sentiment_score": self.sentiment_score,
+            "sentiment_ma5": self.sentiment_ma5,
+            "sentiment_ma20": self.sentiment_ma20,
             "timestamp": int(self.timestamp or time.time()),
         }
 
@@ -680,6 +684,164 @@ def compress_news_local(news_items: list[dict], *, max_headlines: int = 5) -> tu
     if len(body) > 280:
         body = body[:277] + "..."
     return body, score
+
+
+# ── 뉴스 감성 시계열 (Sentiment MA) — Gemini 0 ──
+
+_sentiment_ts_override: Any = None
+_SENTIMENT_TS_FILE = "sentiment_timeseries.json"
+_MAX_SENTIMENT_HISTORY = 120
+
+
+def set_sentiment_timeseries_path_for_tests(path: Any) -> None:
+    """테스트 격리 — None 이면 기본 샌드박스."""
+    global _sentiment_ts_override
+    _sentiment_ts_override = path
+
+
+def sentiment_timeseries_path():
+    from pathlib import Path
+    if _sentiment_ts_override is not None:
+        return _sentiment_ts_override
+    rel = os.getenv("CV_SENTIMENT_TS_FILE", _SENTIMENT_TS_FILE).strip() or _SENTIMENT_TS_FILE
+    try:
+        from sandbox import resolve_in_sandbox, init_sandbox
+        init_sandbox(create_standard_dirs=False)
+        return resolve_in_sandbox(rel, create_parents=True)
+    except Exception:
+        from pathlib import Path
+        p = Path(__file__).resolve().parent / "data" / "sandbox" / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+
+
+def _empty_sentiment_store() -> dict:
+    return {"version": 1, "series": {}, "updated_at": 0}
+
+
+def read_sentiment_store() -> dict:
+    path = sentiment_timeseries_path()
+    if not path.is_file():
+        return _empty_sentiment_store()
+    try:
+        import json
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return _empty_sentiment_store()
+        data.setdefault("version", 1)
+        data.setdefault("series", {})
+        return data
+    except Exception:
+        return _empty_sentiment_store()
+
+
+def write_sentiment_store(store: dict) -> None:
+    from cv_cache_manager import write_json_atomic
+    store["updated_at"] = int(time.time())
+    write_json_atomic(sentiment_timeseries_path(), store)
+
+
+def record_sentiment_observation(
+    ticker: str,
+    score: int,
+    *,
+    timestamp: float | None = None,
+) -> list[dict]:
+    """
+    일별 감성 점수(-10~+10) 누적 — 동일 날짜는 갱신.
+    Returns: 해당 티커 전체 시계열 list[dict].
+    """
+    key = _resolve_yahoo_ticker(ticker).upper()
+    ts = float(timestamp or time.time())
+    day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+    clamped = max(-10, min(10, int(score)))
+
+    store = read_sentiment_store()
+    series = store.setdefault("series", {})
+    hist: list[dict] = list(series.get(key) or [])
+
+    entry = {"date": day, "timestamp": int(ts), "score": clamped}
+    if hist and hist[-1].get("date") == day:
+        hist[-1] = entry
+    else:
+        hist.append(entry)
+
+    hist.sort(key=lambda x: x.get("date", ""))
+    if len(hist) > _MAX_SENTIMENT_HISTORY:
+        hist = hist[-_MAX_SENTIMENT_HISTORY:]
+    series[key] = hist
+    write_sentiment_store(store)
+    return hist
+
+
+def load_sentiment_timeseries(ticker: str):
+    """
+    Pandas DataFrame — index=date, columns score (float).
+    """
+    import pandas as pd
+
+    key = _resolve_yahoo_ticker(ticker).upper()
+    hist = list((read_sentiment_store().get("series") or {}).get(key) or [])
+    if not hist:
+        return pd.DataFrame(columns=["score"])
+
+    rows = []
+    for item in hist:
+        d = item.get("date")
+        if not d:
+            continue
+        try:
+            rows.append({"date": pd.Timestamp(d), "score": float(item.get("score", 0))})
+        except (TypeError, ValueError):
+            continue
+
+    if not rows:
+        return pd.DataFrame(columns=["score"])
+
+    df = pd.DataFrame(rows).sort_values("date").drop_duplicates("date", keep="last")
+    df = df.set_index("date")
+    return df
+
+
+def build_sentiment_ma_frame(df, *, ma_short: int = 5, ma_long: int = 20):
+    """
+    score + MA5 + MA20 컬럼 DataFrame.
+    """
+    import pandas as pd
+
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["score", "ma5", "ma20"])
+
+    out = df[["score"]].copy()
+    out["ma5"] = out["score"].rolling(ma_short, min_periods=ma_short).mean()
+    out["ma20"] = out["score"].rolling(ma_long, min_periods=ma_long).mean()
+    return out
+
+
+def compute_sentiment_ma(ticker: str) -> dict:
+    """
+    Sentiment MA5 / MA20 최신값 및 관측 수.
+    """
+    raw = load_sentiment_timeseries(ticker)
+    empty = {
+        "ma5": None, "ma20": None, "latest_score": None,
+        "observations": 0, "ready": False,
+    }
+    if raw.empty:
+        return empty
+
+    frame = build_sentiment_ma_frame(raw)
+    ma5 = frame["ma5"].iloc[-1] if frame["ma5"].notna().any() else None
+    ma20 = frame["ma20"].iloc[-1] if frame["ma20"].notna().any() else None
+    latest = float(raw["score"].iloc[-1])
+
+    return {
+        "ma5": round(float(ma5), 2) if ma5 == ma5 else None,
+        "ma20": round(float(ma20), 2) if ma20 == ma20 else None,
+        "latest_score": int(latest),
+        "observations": len(raw),
+        "ready": ma5 == ma5 and ma20 == ma20,
+    }
 
 
 def build_timeline_text(report: ValidationReport) -> str:
@@ -773,6 +935,12 @@ def build_market_snapshot(
     timeline = build_timeline_text(report)
     digest = build_compact_digest(report, news_body, sentiment)
 
+    try:
+        record_sentiment_observation(ticker, sentiment)
+        ma_info = compute_sentiment_ma(ticker)
+    except Exception:
+        ma_info = {"ma5": None, "ma20": None}
+
     return MarketSnapshot(
         ticker=ticker,
         query=query,
@@ -785,6 +953,8 @@ def build_market_snapshot(
         compact_digest=digest,
         sources_ok=list(report.sources_succeeded),
         sentiment_score=sentiment,
+        sentiment_ma5=ma_info.get("ma5"),
+        sentiment_ma20=ma_info.get("ma20"),
         timestamp=time.time(),
     )
 
@@ -1061,6 +1231,9 @@ __all__ = [
     "format_briefing", "format_detail_report", "report_to_dict",
     "compress_news_local", "build_timeline_text", "build_compact_digest",
     "build_market_snapshot", "collect_consensus_local",
+    "record_sentiment_observation", "load_sentiment_timeseries",
+    "build_sentiment_ma_frame", "compute_sentiment_ma",
+    "set_sentiment_timeseries_path_for_tests",
     "refresh_market_snapshot_cache", "analyze_stock_on_demand",
     "analyze_stock",
     "reset_cv_gemini_call_count", "get_cv_gemini_call_count",

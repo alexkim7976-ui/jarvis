@@ -22,6 +22,7 @@ from .valuation_models import (
     run_local_valuation_suite,
     fetch_valuation_inputs,
 )
+from .sentiment_momentum import analyze_sentiment_momentum
 from .router import CostAwareRouter, RouteDecision
 from .gemini_gate import fetch_gemini_brief, reset_gemini_call_count, get_gemini_call_count
 
@@ -32,6 +33,7 @@ __all__ = [
     "compute_local_consensus_matrix",
     "calculate_local_dcf_valuation", "calculate_graham_intrinsic_value",
     "run_local_valuation_suite", "fetch_valuation_inputs",
+    "analyze_sentiment_momentum",
     "CostAwareRouter", "RouteDecision",
     "fetch_gemini_brief", "reset_gemini_call_count", "get_gemini_call_count",
 ]
