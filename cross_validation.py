@@ -16,6 +16,8 @@ J.A.R.V.I.S — 다중 API 교차 검증 (Multi-Source Cross-Validation)
 """
 from __future__ import annotations
 
+import os
+import re
 import time
 import statistics
 import threading
@@ -25,6 +27,37 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from data_providers import get_provider
+
+# ── CV 캐시 / On-Demand Gemini 카운터 (테스트용) ──
+_CV_GEMINI_CALL_COUNT = 0
+
+
+def reset_cv_gemini_call_count() -> None:
+    global _CV_GEMINI_CALL_COUNT
+    _CV_GEMINI_CALL_COUNT = 0
+
+
+def get_cv_gemini_call_count() -> int:
+    return _CV_GEMINI_CALL_COUNT
+
+
+def _bump_cv_gemini() -> None:
+    global _CV_GEMINI_CALL_COUNT
+    _CV_GEMINI_CALL_COUNT += 1
+
+
+def _cv_cache_enabled() -> bool:
+    try:
+        from cv_cache_manager import cv_cache_enabled
+        return cv_cache_enabled()
+    except ImportError:
+        return False
+
+
+def _cv_on_demand_gemini_enabled() -> bool:
+    return os.getenv("CV_CACHE_ON_DEMAND_GEMINI", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -566,10 +599,393 @@ def report_to_dict(report: ValidationReport) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════
+#  로컬 합의 정제 + 샌드박스 캐시 (Gemini 0회)
+# ══════════════════════════════════════════════════════════════
+
+_POS_NEWS = re.compile(
+    r"(surge|rally|beat|record|upgrade|buy|growth|win|approval|contract|"
+    r"상승|급등|호재|실적|흑자|수주|승인|돌파|매수)",
+    re.I,
+)
+_NEG_NEWS = re.compile(
+    r"(plunge|crash|miss|downgrade|sell|lawsuit|recall|fire|bankruptcy|"
+    r"하락|급락|악재|적자|소송|리콜|화재|파산|매도|제재)",
+    re.I,
+)
+
+
+@dataclass
+class MarketSnapshot:
+    """정제·합의된 시장 스냅샷 — Gemini 프롬프트에는 compact_digest 만 주입."""
+    ticker: str
+    query: str
+    name: str | None
+    consensus_price: float | None
+    consensus_change_pct: float | None
+    anomaly_flag: bool
+    timeline_text: str
+    news_compact_body: str
+    compact_digest: str
+    sources_ok: list[str]
+    sentiment_score: int = 0
+    timestamp: float = 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "ticker": self.ticker,
+            "query": self.query,
+            "name": self.name,
+            "consensus_price": self.consensus_price,
+            "consensus_change_pct": self.consensus_change_pct,
+            "anomaly_flag": self.anomaly_flag,
+            "timeline_text": self.timeline_text,
+            "news_compact_body": self.news_compact_body,
+            "compact_digest": self.compact_digest,
+            "sources_ok": self.sources_ok,
+            "sentiment_score": self.sentiment_score,
+            "timestamp": int(self.timestamp or time.time()),
+        }
+
+
+def _resolve_yahoo_ticker(query: str) -> str:
+    tk = _resolve_tickers(query)
+    return str(tk.get("_yahoo") or query).strip()
+
+
+def compress_news_local(news_items: list[dict], *, max_headlines: int = 5) -> tuple[str, int]:
+    """
+    로컬 뉴스 압축 — Gemini 없이 제목 기반 감성 힌트.
+    Returns: (news_compact_body, sentiment_score -10..+10)
+    """
+    if not news_items:
+        return "", 0
+
+    titles: list[str] = []
+    score = 0
+    for item in news_items[:max_headlines]:
+        title = (item.get("title") or "").strip()
+        if not title:
+            continue
+        titles.append(title[:80])
+        if _POS_NEWS.search(title):
+            score += 2
+        if _NEG_NEWS.search(title):
+            score -= 2
+
+    score = max(-10, min(10, score))
+    if not titles:
+        return "", score
+
+    body = "; ".join(titles)
+    if len(body) > 280:
+        body = body[:277] + "..."
+    return body, score
+
+
+def build_timeline_text(report: ValidationReport) -> str:
+    """소스별 가격·등락 타임라인 — raw OHLCV 제외."""
+    nm = report.name or report.query
+    parts: list[str] = []
+
+    if report.price.accepted:
+        src_prices = ", ".join(f"{s} {v:,.2f}" for s, v in report.price.accepted[:4])
+        parts.append(f"{nm} 가격 소스: {src_prices}")
+
+    if report.price.final is not None:
+        cur = report.currency or ""
+        parts.append(f"합의가 {_fmt_money(report.price.final, cur)}")
+
+    if report.change_pct.final is not None:
+        sign = "+" if report.change_pct.final >= 0 else ""
+        parts.append(f"전일대비 {sign}{report.change_pct.final:.2f}%")
+
+    if report.price.rejected:
+        rej = ", ".join(s for s, _, _ in report.price.rejected[:3])
+        parts.append(f"이상치 제외: {rej}")
+
+    n_disc = report.extras.get("disclosures_30d")
+    if n_disc:
+        parts.append(f"최근 공시 {n_disc}건")
+
+    return ". ".join(parts) + "." if parts else f"{nm} 교차검증 데이터 없음."
+
+
+def detect_anomaly_flag(report: ValidationReport) -> bool:
+    """가격 이상치·급변동·다수 소스 불일치."""
+    if report.price.rejected:
+        return True
+    cp = report.change_pct.final
+    if cp is not None and abs(cp) >= float(os.getenv("CV_CACHE_CHANGE_SPIKE_PCT", "5")):
+        return True
+    ok = len(report.sources_succeeded)
+    attempted = len(report.sources_attempted)
+    if attempted >= 3 and ok < max(2, attempted // 2):
+        return True
+    return False
+
+
+def build_compact_digest(
+    report: ValidationReport,
+    news_body: str,
+    sentiment_score: int,
+) -> str:
+    """Gemini On-Demand 주입용 1~2문장 요약."""
+    nm = report.name or report.query
+    cur = report.currency or ""
+    srcs = report.sources_succeeded[:3]
+    src_label = "/".join(s.replace(" Financial Modeling Prep", " FMP") for s in srcs) or "다중소스"
+
+    price_part = ""
+    if report.price.final is not None:
+        price_part = f"{src_label} 합의 가격 {_fmt_money(report.price.final, cur)}"
+        if report.change_pct.final is not None:
+            sign = "+" if report.change_pct.final >= 0 else ""
+            price_part += f", 전일대비 {sign}{report.change_pct.final:.1f}%"
+
+    news_part = ""
+    if news_body:
+        tone = "중립"
+        if sentiment_score >= 4:
+            tone = "호재성 뉴스 집중"
+        elif sentiment_score <= -4:
+            tone = "악재성 뉴스 집중"
+        news_part = f"AI 감성 점수 {sentiment_score:+d}로 {tone}"
+
+    anomaly = " 특이점 감지." if detect_anomaly_flag(report) else ""
+    chunks = [c for c in (f"{nm}({report.query})", price_part, news_part) if c]
+    digest = ". ".join(chunks) + anomaly
+    return digest.strip()
+
+
+def build_market_snapshot(
+    query: str,
+    report: ValidationReport,
+    *,
+    news_items: list[dict] | None = None,
+    extra_note: str = "",
+) -> MarketSnapshot:
+    """교차검증 리포트 + 로컬 뉴스 압축 → MarketSnapshot."""
+    ticker = _resolve_yahoo_ticker(query)
+    news_body, sentiment = compress_news_local(news_items or [])
+    if extra_note:
+        news_body = f"{extra_note}. {news_body}".strip(" .")
+
+    timeline = build_timeline_text(report)
+    digest = build_compact_digest(report, news_body, sentiment)
+
+    return MarketSnapshot(
+        ticker=ticker,
+        query=query,
+        name=report.name,
+        consensus_price=report.price.final,
+        consensus_change_pct=report.change_pct.final,
+        anomaly_flag=detect_anomaly_flag(report),
+        timeline_text=timeline,
+        news_compact_body=news_body,
+        compact_digest=digest,
+        sources_ok=list(report.sources_succeeded),
+        sentiment_score=sentiment,
+        timestamp=time.time(),
+    )
+
+
+def _fetch_news_local(query: str, limit: int = 5) -> list[dict]:
+    """yfinance/Tavily 로컬 수집 — Gemini 미호출."""
+    ticker = _resolve_yahoo_ticker(query)
+    try:
+        from news_analyzer import fetch_and_filter_news
+        return fetch_and_filter_news(ticker, limit=limit, use_tavily=True)
+    except ImportError:
+        return []
+
+
+def collect_consensus_local(
+    query: str,
+    timeout: float = 12.0,
+    *,
+    include_news: bool = True,
+    extra_note: str = "",
+) -> tuple[ValidationReport, MarketSnapshot]:
+    """병렬 페치 → 교차검증 → 로컬 뉴스 압축. Gemini 0회."""
+    results = fetch_all_parallel(query, timeout=timeout)
+    report = cross_validate(results, query=query)
+    news = _fetch_news_local(query) if include_news else []
+    snap = build_market_snapshot(query, report, news_items=news, extra_note=extra_note)
+    return report, snap
+
+
+def refresh_market_snapshot_cache(
+    query: str,
+    timeout: float = 12.0,
+    *,
+    include_news: bool = True,
+    extra_note: str = "",
+) -> MarketSnapshot:
+    """백그라운드 워커용 — 샌드박스 JSON 갱신만, Gemini 0회."""
+    report, snap = collect_consensus_local(
+        query, timeout=timeout, include_news=include_news, extra_note=extra_note,
+    )
+    if _cv_cache_enabled():
+        try:
+            from cv_cache_manager import upsert_snapshot
+            upsert_snapshot(snap.to_dict())
+        except ImportError:
+            pass
+    return snap
+
+
+def _enhance_briefing_with_gemini(compact_digest: str, query: str) -> str:
+    """On-Demand — compact_digest 만 Gemini에 전달 (raw 데이터 배제)."""
+    if not compact_digest or not _cv_on_demand_gemini_enabled():
+        return ""
+
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        try:
+            from secure_config import get_secret
+            api_key = get_secret("GEMINI_API_KEY") or ""
+        except Exception:
+            api_key = ""
+
+    if not api_key:
+        return ""
+
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        return ""
+
+    model_name = os.getenv("GEMINI_FLASH_MODEL", "gemini-3.5-flash")
+    prompt = (
+        f"종목: {query}\n"
+        f"교차검증 요약(이 텍스트만 참고, 추가 데이터 요청 금지):\n{compact_digest}\n\n"
+        "위 요약을 바탕으로 사용자에게 읽어줄 한국어 음성 브리핑 2문장 이내로 작성하세요. "
+        "숫자는 요약에 있는 값만 사용하세요."
+    )
+
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
+        resp = model.generate_content(prompt)
+        _bump_cv_gemini()
+        text = (getattr(resp, "text", None) or "").strip()
+        return text[:500]
+    except Exception:
+        return ""
+
+
+def analyze_stock_on_demand(query: str, timeout: float = 12.0) -> dict:
+    """
+    On-Demand — 캐시 우선, compact_digest 만 Gemini 주입.
+    캐시 미스/만료 시 로컬 재수집(역시 Gemini 0) 후 브리핑.
+    """
+    snap_dict: dict | None = None
+    report: ValidationReport | None = None
+
+    if _cv_cache_enabled():
+        try:
+            from cv_cache_manager import get_snapshot, is_snapshot_fresh
+            cached = get_snapshot(_resolve_yahoo_ticker(query))
+            if cached and is_snapshot_fresh(cached):
+                snap_dict = cached
+        except ImportError:
+            pass
+
+    if snap_dict is None:
+        report, snap = collect_consensus_local(query, timeout=timeout)
+        snap_dict = snap.to_dict()
+        if _cv_cache_enabled():
+            try:
+                from cv_cache_manager import upsert_snapshot
+                upsert_snapshot(snap_dict)
+            except ImportError:
+                pass
+    else:
+        # 캐시 히트 — 로컬 브리핑은 timeline/digest 기반
+        report = None
+
+    briefing = snap_dict.get("timeline_text") or format_briefing(
+        report if report else _report_from_snapshot(snap_dict)
+    )
+    gemini_note = _enhance_briefing_with_gemini(
+        snap_dict.get("compact_digest") or "", query,
+    )
+    if gemini_note:
+        briefing = gemini_note
+
+    rep_dict = report_to_dict(report) if report else _report_dict_from_snapshot(snap_dict)
+
+    return {
+        "success": bool(snap_dict.get("sources_ok")),
+        "briefing": briefing,
+        "report": rep_dict,
+        "detail": _detail_from_snapshot(snap_dict) if report is None else format_detail_report(report),
+        "cached": report is None,
+        "compact_digest": snap_dict.get("compact_digest", ""),
+        "gemini_called": bool(gemini_note),
+        "snapshot": snap_dict,
+    }
+
+
+def _report_from_snapshot(snap: dict) -> ValidationReport:
+    """캐시 히트 시 format_briefing 폴백용 최소 ValidationReport."""
+    fc = FieldConsensus(snap.get("consensus_price"), [], [], "캐시")
+    cp = FieldConsensus(snap.get("consensus_change_pct"), [], [], "캐시")
+    return ValidationReport(
+        query=snap.get("query", ""),
+        name=snap.get("name"),
+        currency="",
+        sources_attempted=snap.get("sources_ok") or [],
+        sources_succeeded=snap.get("sources_ok") or [],
+        sources_failed=[],
+        price=fc, volume=FieldConsensus(None, [], [], "캐시"),
+        per=FieldConsensus(None, [], [], "캐시"),
+        pbr=FieldConsensus(None, [], [], "캐시"),
+        market_cap=FieldConsensus(None, [], [], "캐시"),
+        eps=FieldConsensus(None, [], [], "캐시"),
+        change_pct=cp,
+        extras={},
+        raw=[],
+    )
+
+
+def _report_dict_from_snapshot(snap: dict) -> dict:
+    return {
+        "query": snap.get("query"),
+        "name": snap.get("name"),
+        "cached": True,
+        "consensus_price": snap.get("consensus_price"),
+        "consensus_change_pct": snap.get("consensus_change_pct"),
+        "anomaly_flag": snap.get("anomaly_flag"),
+        "sources_succeeded": snap.get("sources_ok") or [],
+        "compact_digest": snap.get("compact_digest"),
+    }
+
+
+def _detail_from_snapshot(snap: dict) -> str:
+    return (
+        f"━━━ 캐시 스냅샷: {snap.get('name') or snap.get('query')} ━━━\n"
+        f"  consensus_price  {snap.get('consensus_price')}\n"
+        f"  change_pct         {snap.get('consensus_change_pct')}\n"
+        f"  anomaly            {snap.get('anomaly_flag')}\n"
+        f"  digest             {(snap.get('compact_digest') or '')[:120]}"
+    )
+
+
+# ══════════════════════════════════════════════════════════════
 #  공개 API — 한 줄 호출
 # ══════════════════════════════════════════════════════════════
-def analyze_stock(query: str, timeout: float = 12.0) -> dict:
-    """사용자 요청 한 건 → 병렬 페치 → 교차검증 → 브리핑 문구·구조화 리포트 반환."""
+def analyze_stock(query: str, timeout: float = 12.0, *, on_demand: bool | None = None) -> dict:
+    """
+    사용자 요청 한 건 → 병렬 페치 → 교차검증 → 브리핑 문구·구조화 리포트 반환.
+
+    CV_CACHE_ENABLED=1 이면 On-Demand 경로(캐시 + compact_digest Gemini) 사용.
+    on_demand=False 로 레거시 동작 강제 가능.
+    """
+    use_on_demand = on_demand if on_demand is not None else _cv_cache_enabled()
+    if use_on_demand and _cv_cache_enabled():
+        return analyze_stock_on_demand(query, timeout=timeout)
+
     results = fetch_all_parallel(query, timeout=timeout)
     report = cross_validate(results, query=query)
     briefing = format_briefing(report)
@@ -627,10 +1043,14 @@ def execute_crossval_tool(name: str, arguments) -> dict:
 
 
 __all__ = [
-    "StockData", "FieldConsensus", "ValidationReport",
+    "StockData", "FieldConsensus", "ValidationReport", "MarketSnapshot",
     "fetch_all_parallel", "cross_validate",
     "format_briefing", "format_detail_report", "report_to_dict",
+    "compress_news_local", "build_timeline_text", "build_compact_digest",
+    "build_market_snapshot", "collect_consensus_local",
+    "refresh_market_snapshot_cache", "analyze_stock_on_demand",
     "analyze_stock",
+    "reset_cv_gemini_call_count", "get_cv_gemini_call_count",
     "CROSSVAL_TOOLS", "CROSSVAL_TOOL_NAMES", "execute_crossval_tool",
 ]
 

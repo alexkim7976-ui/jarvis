@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, sys, time, wave, json, queue, struct, shutil
+import os, sys, time, wave, json, queue, struct, shutil, re
 import threading, subprocess
 import warnings
 from pathlib import Path
@@ -78,6 +78,7 @@ from resource_profile import (
 from context_manager import get_context_window, append_exchange, context_turn_limit
 from gemini_cache_manager import (
     get_cache_manager, log_gemini_usage, set_cache_logger, cache_enabled,
+    inject_market_snapshot_into_user_message,
 )
 from alert_pipeline import create_jarvis_runtime, get_runtime, init_runtime
 from media_tools import (
@@ -686,6 +687,86 @@ def _compose_system_prompt(extra=""):
     return JARVIS_SYSTEM_PROMPT + _gaze_context_suffix() + get_media_context_suffix() + (extra or "")
 
 
+_DEICTIC_STOCK_RE = re.compile(
+    r"아까|그\s*종목|방금\s*(그|말한)|전에\s*(말한|조회|브리핑)",
+    re.I,
+)
+
+
+def _extract_ticker_hint(text: str, history: list | None = None) -> str:
+    """음성/텍스트에서 종목 티커 힌트 추출 — '아까 그 종목'은 최신 캐시 스냅샷."""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+
+    if _DEICTIC_STOCK_RE.search(raw):
+        try:
+            from cv_cache_manager import get_latest_snapshot, cv_cache_enabled
+            if cv_cache_enabled():
+                latest = get_latest_snapshot()
+                if latest:
+                    return (latest.get("ticker") or latest.get("query") or "").strip()
+        except ImportError:
+            pass
+
+    cleaned = re.sub(r"^(자비스|jarvis)[,\s]*", "", raw, flags=re.I).strip()
+    cleaned = re.sub(
+        r"(브리핑|알려\s*줘|알아\s*봐|조회|정보|뉴스|어때|상황|분석)[^\w가-힣]*$",
+        "",
+        cleaned,
+    ).strip(" ,.")
+
+    try:
+        from stock_quant import resolve_alert_query, _KR_TICKER_MAP, _KR_STT_ALIASES
+        for q in (cleaned, raw):
+            if not q:
+                continue
+            r = resolve_alert_query(q)
+            if r.get("confident") and r.get("ticker"):
+                return str(r["ticker"])
+
+        merged = {**_KR_STT_ALIASES, **_KR_TICKER_MAP}
+        for alias, ticker in sorted(merged.items(), key=lambda x: -len(x[0] or "")):
+            if alias and len(alias) >= 2 and alias in cleaned:
+                return str(ticker)
+
+        for m in re.finditer(r"\b[A-Z]{1,5}\b", cleaned.upper()):
+            return m.group(0)
+    except ImportError:
+        pass
+
+    if history:
+        for msg in reversed(history):
+            if msg.get("role") != "user":
+                continue
+            prev = (msg.get("content") or "").strip()
+            if not prev or prev == raw:
+                continue
+            hint = _extract_ticker_hint(prev, history=None)
+            if hint:
+                return hint
+    return ""
+
+
+def _apply_cv_cache_to_user_text(text: str, history: list | None = None) -> str:
+    """CV 샌드박스 compact_digest 를 유저 메시지에 최소 토큰으로 접두."""
+    try:
+        from cv_cache_manager import cv_cache_enabled
+        if not cv_cache_enabled():
+            return text
+    except ImportError:
+        return text
+
+    hint = _extract_ticker_hint(text, history)
+    if not hint:
+        return text
+
+    enriched = inject_market_snapshot_into_user_message(text, hint)
+    if enriched != text:
+        log("INFO", f"CV 캐시 digest 주입 → {hint}")
+    return enriched
+
+
 def ask_jarvis_openai(text, client, history, pipeline=None):
     msgs=[{"role":"system","content":_compose_system_prompt()}]
     msgs.extend(get_context_window(history)); msgs.append({"role":"user","content":text})
@@ -914,6 +995,7 @@ def ask_jarvis_streaming(text, oc, history, pipeline):
     refusal = _injection_refusal(text, pipeline)
     if refusal is not None:
         return refusal
+    text = _apply_cv_cache_to_user_text(text, history)
     if LLM_PROVIDER=="gemini":
         if not GEMINI_API_KEY: return "Gemini 키 없음"
         try:
@@ -937,6 +1019,7 @@ def ask_jarvis(text, oc, history):
     refusal = _injection_refusal(text)
     if refusal is not None:
         return refusal
+    text = _apply_cv_cache_to_user_text(text, history)
     if LLM_PROVIDER=="gemini":
         try:
             a=ask_jarvis_gemini(text,history)

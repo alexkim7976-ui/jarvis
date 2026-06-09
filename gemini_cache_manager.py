@@ -536,3 +536,30 @@ class GeminiCacheManager:
 
 def get_cache_manager() -> GeminiCacheManager:
     return GeminiCacheManager.get()
+
+
+def market_snapshot_digest_for_prompt(ticker_or_query: str) -> str | None:
+    """
+    On-Demand LLM 호출 시 market_snapshot.json 의 compact_digest 만 반환.
+    gemini_cache_manager ↔ cv_cache_manager 연동 진입점.
+    """
+    try:
+        from cv_cache_manager import get_compact_digest, cv_cache_enabled
+        if not cv_cache_enabled():
+            return None
+        return get_compact_digest(ticker_or_query)
+    except ImportError:
+        return None
+
+
+def inject_market_snapshot_into_user_message(user_text: str, ticker_hint: str = "") -> str:
+    """
+    사용자 음성/텍스트 요청에 캐시 digest 를 최소 토큰으로 접두.
+    ticker_hint 가 없으면 user_text 에서 추출 시도하지 않고 None 반환.
+    """
+    if not ticker_hint:
+        return user_text
+    digest = market_snapshot_digest_for_prompt(ticker_hint)
+    if not digest:
+        return user_text
+    return f"[시장스냅샷] {digest}\n\n{user_text}"

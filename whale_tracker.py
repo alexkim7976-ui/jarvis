@@ -520,6 +520,25 @@ class WhaleTracker:
         with self._lock:
             self._event_q.append(evt)
         _log(f"🚨 대량 매도 {len(sells)}건 포착")
+
+        # CV 샌드박스 캐시 갱신 (Gemini 0회)
+        if os.getenv("CV_CACHE_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off"):
+            try:
+                from cross_validation import refresh_market_snapshot_cache
+                seen_tickers: set[str] = set()
+                for s in sells:
+                    t = (s.get("ticker") or "").strip().upper()
+                    if not t or t in seen_tickers:
+                        continue
+                    seen_tickers.add(t)
+                    note = (
+                        f"고래 {s.get('person', '?')} 대량매도 "
+                        f"${float(s.get('amount_usd') or 0) / 1_000_000:.1f}M"
+                    )
+                    refresh_market_snapshot_cache(t, include_news=False, extra_note=note)
+            except Exception:
+                pass
+
         return sells
 
     @property

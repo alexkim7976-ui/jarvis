@@ -78,6 +78,40 @@ def _display_name(ticker: str) -> str:
     return _KR_NAME_MAP.get(ticker.upper(), ticker)
 
 
+def _background_cv_cache_mode() -> bool:
+    """백그라운드 루프: 캐시만 갱신, Gemini 0회."""
+    if os.getenv("CV_CACHE_ENABLED", "1").strip().lower() in ("0", "false", "no", "off"):
+        return False
+    return os.getenv("CV_CACHE_BACKGROUND_NO_GEMINI", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def _local_critical_from_news(ticker: str) -> list[dict]:
+    """Gemini 없이 로컬 키워드 기반 CRITICAL 후보."""
+    news = fetch_and_filter_news(ticker, limit=NEWS_MAX_PER_TICKER)
+    if not news:
+        return []
+    _, sentiment = _local_sentiment_from_titles(news)
+    if abs(sentiment) < 3:
+        return []
+    top = news[0]
+    return [{
+        "title": top.get("title", ""),
+        "type": "CRITICAL",
+        "score": sentiment,
+        "reason": f"로컬 키워드 감성 분석 (Gemini 미호출, score={sentiment:+d})",
+    }]
+
+
+def _local_sentiment_from_titles(news_items: list[dict]) -> tuple[str, int]:
+    try:
+        from cross_validation import compress_news_local
+        return compress_news_local(news_items)
+    except ImportError:
+        return "", 0
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  1. 뉴스 수집 + 전처리 (중복/유사 기사 1차 필터)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -506,7 +540,60 @@ class NewsAnalyzer:
                 time.sleep(2)
                 slept += 2
 
+    def _check_ticker_cache_only(self, ticker: str):
+        """CV 캐시 모드 — refresh_market_snapshot_cache 만, Gemini 0회."""
+        try:
+            from cross_validation import refresh_market_snapshot_cache
+            snap = refresh_market_snapshot_cache(ticker, include_news=True)
+        except Exception as e:
+            _log(f"CV 캐시 갱신 실패({ticker}): {e}")
+            return
+
+        name = snap.name or _display_name(ticker)
+        critical = _local_critical_from_news(ticker)
+        if not critical:
+            _log(f"CV 캐시 갱신 OK ({ticker}) — 로컬 CRITICAL 없음")
+            return
+
+        fresh = []
+        for it in critical:
+            key = _normalize_title(it["title"])
+            if key and key not in self._seen_titles:
+                self._seen_titles.add(key)
+                fresh.append(it)
+        if not fresh:
+            return
+
+        self._total_critical += len(fresh)
+        top = max(fresh, key=lambda x: abs(x["score"]))
+        urgent = abs(top["score"]) >= self.urgent_threshold
+        overlay_table = _build_overlay_table(ticker, fresh)
+        evt = {
+            "source": "news",
+            "ticker": ticker,
+            "name": name,
+            "urgent": urgent,
+            "score": top["score"],
+            "title": top["title"],
+            "reason": top["reason"],
+            "critical_items": fresh,
+            "overlay_table": overlay_table,
+            "message": _briefing_text(ticker, top) if urgent else (
+                f"선생님, {name} 관련 주목할 뉴스가 있습니다. "
+                f"{top['reason']} 예상 영향은 {top['score']:+d}점입니다."
+            ),
+            "timestamp": datetime.now().isoformat(),
+            "cv_cache_only": True,
+            "compact_digest": snap.compact_digest,
+        }
+        self._enqueue(evt)
+        _log(f"CV 캐시+로컬({'🚨' if urgent else '◆'}) {name}: {top['title'][:40]}")
+
     def _check_ticker(self, ticker: str):
+        if _background_cv_cache_mode():
+            self._check_ticker_cache_only(ticker)
+            return
+
         result = score_ticker_news(ticker)
         if not result.get("success"):
             return
