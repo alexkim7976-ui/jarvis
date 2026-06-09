@@ -18,6 +18,7 @@ analyze_stock_investment 의 포지션 사이징과 결합되어, 백그라운�
 from __future__ import annotations
 
 import math
+import numpy as np
 from datetime import datetime
 
 # 시나리오: z=충격 표준편차 배수, horizon_days=충격 지속(거래일), sim_kind=공급망 엔진 매핑
@@ -33,6 +34,34 @@ _MACRO_DD_MULT = {"안정": 1.0, "경계": 1.2, "위험": 1.5}
 
 # 리스크 가중치 1.0 에 해당하는 손실률(%) — |MDD| 40% = 최대 위험
 _RISK_WEIGHT_FLOOR = 40.0
+
+# ── 역사적 What-If 위기 시나리오 (deterministic 상수 — Gemini 0) ──
+# 몬테카를로 난수 행렬: r_t ~ N(μ, σ)  where σ = base_vol × vol_mult × beta_shock
+HISTORICAL_WHATIF_SCENARIOS = [
+    {
+        "key": "LEHMAN_2008",
+        "label": "2008 리먼 브라더스 쇼크",
+        "en": "LEHMAN 2008",
+        "drift": -0.0035,          # 일간 하방 drift (유동성 위기)
+        "vol_mult": 2.4,           # 변동성 급증
+        "beta_shock": 1.85,        # 시장 베타·상관 급등
+        "horizon_days": 42,        # ~2개월 충격 구간
+        "correlation_stress": 0.92,
+    },
+    {
+        "key": "COVID_2020",
+        "label": "2020 코로나 팬데믹 블랙스완",
+        "en": "COVID BLACK SWAN",
+        "drift": -0.0045,          # 단기 연쇄 폭락
+        "vol_mult": 3.2,           # 하이퍼 변동성
+        "beta_shock": 1.50,
+        "horizon_days": 21,        # 급격 V자 전 구간
+        "correlation_stress": 0.88,
+    },
+]
+
+DEFAULT_MC_SIMS = 10_000
+DEFAULT_MC_HORIZON = 21
 
 _STRESS_CACHE: dict = {}
 _STRESS_TTL_SECONDS = 300
@@ -133,3 +162,193 @@ def estimate_position_stress(ticker: str, df=None, macro_status=None,
     }
     _STRESS_CACHE[key] = {"ts": now, "data": data}
     return data
+
+
+def _load_portfolio_weights(focus_ticker: str | None = None) -> dict[str, float]:
+    """
+    PORTFOLIO holdings → {TICKER: weight} (0~1).
+    보유 없으면 focus_ticker 100% 또는 빈 dict.
+    """
+    try:
+        from portfolio_manager import PortfolioManager
+        pm = PortfolioManager()
+        holdings = pm.data.get("holdings") or {}
+        if not holdings:
+            if focus_ticker:
+                return {str(focus_ticker).upper(): 1.0}
+            return {}
+        notionals: dict[str, float] = {}
+        for tk, h in holdings.items():
+            sh = float(h.get("shares") or 0)
+            px = float(h.get("avg_price_usd") or h.get("avg_price_krw") or 0)
+            val = sh * px
+            if val > 0:
+                notionals[str(tk).upper()] = notionals.get(str(tk).upper(), 0) + val
+        if not notionals:
+            n = len(holdings)
+            return {str(k).upper(): 1.0 / n for k in holdings}
+        total = sum(notionals.values())
+        return {k: v / total for k, v in notionals.items()}
+    except Exception:
+        if focus_ticker:
+            return {str(focus_ticker).upper(): 1.0}
+        return {}
+
+
+def _fetch_close_series(ticker: str):
+    try:
+        from stock_quant import fetch_stock_data
+        df, _, err = fetch_stock_data(ticker, period="6mo")
+        if df is not None and not df.empty and not err:
+            return df["Close"]
+    except Exception:
+        pass
+    return None
+
+
+def _portfolio_base_vol(weights: dict[str, float], close_map: dict | None = None) -> float:
+    """가중 평균 일간 변동성 + 다종목 시스템 리스크 가산."""
+    if not weights:
+        return 0.02
+    close_map = close_map or {}
+    vols: list[float] = []
+    ws: list[float] = []
+    for tk, w in weights.items():
+        close = close_map.get(tk)
+        if close is None:
+            close = _fetch_close_series(tk)
+        vols.append(_daily_vol(close))
+        ws.append(w)
+    ws_arr = np.array(ws, dtype=float)
+    ws_arr /= ws_arr.sum() if ws_arr.sum() > 0 else 1.0
+    weighted = float(np.dot(ws_arr, vols))
+    n = len(weights)
+    systemic_bump = 1.0 + 0.15 * max(0, n - 1)
+    return max(0.015, weighted * systemic_bump)
+
+
+def _simulate_historical_crisis_mc(
+    base_vol: float,
+    scenario: dict,
+    *,
+    n_sims: int = DEFAULT_MC_SIMS,
+    seed: int | None = None,
+) -> dict:
+    """
+    몬테카를로 n_sims 경로 — 역사적 쇼크 계수 주입.
+    Returns expected MDD (p5 tail), VaR95, stress_score.
+    """
+    rng = np.random.default_rng(seed)
+    horizon = int(scenario.get("horizon_days") or DEFAULT_MC_HORIZON)
+    sigma = base_vol * float(scenario["vol_mult"]) * float(scenario["beta_shock"])
+    mu = float(scenario["drift"])
+    corr = float(scenario.get("correlation_stress") or 0.9)
+
+    # 공통 시스템 충격 + 잔차 (상관 급등 반영)
+    common = rng.normal(mu, sigma * corr, size=(n_sims, horizon))
+    idio = rng.normal(mu * (1 - corr), sigma * (1 - corr), size=(n_sims, horizon))
+    rets = common + idio
+
+    price = np.empty((n_sims, horizon + 1), dtype=np.float64)
+    price[:, 0] = 1.0
+    price[:, 1:] = np.cumprod(1.0 + rets, axis=1)
+    running_max = np.maximum.accumulate(price, axis=1)
+    dd = (price - running_max) / running_max
+    mdd = dd.min(axis=1)
+
+    horizon_ret = price[:, -1] - 1.0
+    p5_mdd = float(np.percentile(mdd, 5))
+    p50_mdd = float(np.percentile(mdd, 50))
+    worst_mdd = float(mdd.min())
+    var_95 = float(np.percentile(horizon_ret, 5))
+
+    est_mdd_pct = round(p5_mdd * 100, 2)
+    var_95_pct = round(var_95 * 100, 2)
+    stress_score = round(min(100.0, abs(est_mdd_pct) / _RISK_WEIGHT_FLOOR * 100), 1)
+
+    del rets, price, running_max, dd, mdd, horizon_ret, common, idio
+    return {
+        "key": scenario["key"],
+        "label": scenario["label"],
+        "en": scenario["en"],
+        "expected_mdd_pct": est_mdd_pct,
+        "median_mdd_pct": round(p50_mdd * 100, 2),
+        "worst_mdd_pct": round(worst_mdd * 100, 2),
+        "var_95_pct": var_95_pct,
+        "stress_score": stress_score,
+        "horizon_days": horizon,
+        "n_sims": n_sims,
+        "shock": {
+            "drift": scenario["drift"],
+            "vol_mult": scenario["vol_mult"],
+            "beta_shock": scenario["beta_shock"],
+        },
+    }
+
+
+def run_local_whatif_stress_test(
+    ticker: str | None = None,
+    *,
+    portfolio_weights: dict[str, float] | None = None,
+    close_map: dict | None = None,
+    macro_status: dict | None = None,
+    score: float | None = None,
+    n_sims: int = DEFAULT_MC_SIMS,
+    seed: int | None = None,
+) -> dict:
+    """
+    What-If 역사적 위기 백테스트 — 10,000경로 MC, Gemini 0.
+
+    portfolio_weights 미지정 시 PORTFOLIO.json 또는 ticker 100%.
+    """
+    weights = dict(portfolio_weights or _load_portfolio_weights(ticker))
+    if not weights and ticker:
+        weights = {str(ticker).upper(): 1.0}
+    if not weights:
+        return {
+            "engine": "whatif_monte_carlo",
+            "n_sims": n_sims,
+            "scenarios": [],
+            "worst": None,
+            "stress_test_score": 0,
+            "portfolio_weights": {},
+            "summary_kr": "포트폴리오/종목 데이터 없음",
+        }
+
+    level = (macro_status or {}).get("risk_level", "안정")
+    macro_mult = _MACRO_DD_MULT.get(level, 1.0)
+    base_vol = _portfolio_base_vol(weights, close_map) * macro_mult
+    s = 60.0 if score is None else float(score)
+    quality_mult = 1.0 + max(0.0, (60.0 - s)) / 100.0
+    eff_vol = base_vol * quality_mult
+
+    scenarios = []
+    for i, sc in enumerate(HISTORICAL_WHATIF_SCENARIOS):
+        sd = None if seed is None else int(seed) + i * 997
+        scenarios.append(_simulate_historical_crisis_mc(eff_vol, sc, n_sims=n_sims, seed=sd))
+
+    scenarios.sort(key=lambda r: r["expected_mdd_pct"])
+    worst = scenarios[0]
+    stress_test_score = round(
+        max(s["stress_score"] for s in scenarios) if scenarios else 0, 1,
+    )
+
+    summary = (
+        f"최악 What-If '{worst['label']}' 재현 시 예상 MDD {worst['expected_mdd_pct']:.1f}%, "
+        f"VaR(95%) {worst['var_95_pct']:.1f}%, 스트레스 점수 {stress_test_score:.0f}/100."
+    )
+
+    return {
+        "engine": "whatif_monte_carlo",
+        "n_sims": n_sims,
+        "base_daily_vol": round(eff_vol, 4),
+        "macro_level": level,
+        "portfolio_weights": {k: round(v, 4) for k, v in weights.items()},
+        "scenarios": scenarios,
+        "worst": worst,
+        "stress_test_score": stress_test_score,
+        "estimated_mdd_pct": worst["expected_mdd_pct"],
+        "var_95_pct": worst["var_95_pct"],
+        "summary_kr": summary,
+        "gemini_called": False,
+    }

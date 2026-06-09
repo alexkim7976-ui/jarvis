@@ -86,6 +86,13 @@ def build_value_context(ctx: dict[str, Any]) -> str:
             f"로컬매트릭스={mx.get('local_matrix_score')}/100 ({mx.get('grade')}) "
             f"재무={layers.get('fundamental', {}).get('score', '?')}"
         )
+    st = ctx.get("stress_test_profile") or {}
+    worst = st.get("worst") or {}
+    if worst.get("expected_mdd_pct") is not None:
+        lines.append(
+            f"WhatIf[{worst.get('label')}]: MDD={worst.get('expected_mdd_pct')}% "
+            f"VaR95={worst.get('var_95_pct')}%"
+        )
     return "\n".join(lines)
 
 
@@ -138,7 +145,7 @@ Chain-of-Thought (내부적으로만, 출력에는 CoT 생략 가능):
 
 출력 규칙:
 - 반드시 '선생님,'으로 시작하는 하나의 연속 브리핑만 출력
-- 기술(매물대·이평)·가치(DCF·MoS)·심리(감성 MA)를 모두 반영
+- 기술(매물대·이평)·가치(DCF·MoS)·심리(감성 MA)·What-If 리스크(MDD/VaR)를 모두 반영
 - 컨텍스트에 없는 숫자 invent 금지
 - Gemini/클라우드 API 언급 금지
 - 한국어

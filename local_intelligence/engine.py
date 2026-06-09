@@ -52,6 +52,7 @@ class LocalAnalysisReport:
     sentiment_divergence_signal: str = ""
     sentiment_ma5: float | None = None
     sentiment_ma20: float | None = None
+    stress_test_profile: dict = field(default_factory=dict)
     multi_agent_trace: dict = field(default_factory=dict)
     metrics_snapshot: dict = field(default_factory=dict)
     timestamp: float = 0.0
@@ -82,6 +83,7 @@ class LocalAnalysisReport:
             "sentiment_divergence_signal": self.sentiment_divergence_signal,
             "sentiment_ma5": self.sentiment_ma5,
             "sentiment_ma20": self.sentiment_ma20,
+            "stress_test_profile": self.stress_test_profile,
             "multi_agent_trace": self.multi_agent_trace,
             "local_matrix_score": self.local_matrix.get("local_matrix_score"),
             "local_matrix_grade": self.local_matrix.get("grade"),
@@ -178,6 +180,21 @@ def gather_fusion_context(query: str, *, timeout: float = 12.0) -> dict[str, Any
     except Exception:
         sentiment_momentum = {}
 
+    stress_test_profile: dict = {}
+    try:
+        from portfolio_stress import run_local_whatif_stress_test
+        stress_test_profile = run_local_whatif_stress_test(
+            ticker,
+            score=float(hybrid) if hybrid else None,
+            macro_status=(
+                {"risk_level": "경계"} if (market_snap and market_snap.anomaly_flag)
+                else {"risk_level": "안정"}
+            ),
+            seed=abs(hash(ticker)) % 100_000,
+        )
+    except Exception:
+        stress_test_profile = {}
+
     return {
         "ticker": ticker,
         "query": query,
@@ -229,6 +246,7 @@ def gather_fusion_context(query: str, *, timeout: float = 12.0) -> dict[str, Any
         "sentiment_momentum_signal": str(
             sentiment_momentum.get("sentiment_momentum_signal") or ""
         ),
+        "stress_test_profile": stress_test_profile,
         "local_matrix_score": local_matrix.get("local_matrix_score"),
         "local_matrix_grade": local_matrix.get("grade"),
         "anomaly_flag": bool(
@@ -299,6 +317,14 @@ def build_compact_context(ctx: dict[str, Any]) -> str:
             f"EPS={gr.get('eps')} g={gr.get('growth_pct')}% Y={gr.get('treasury_yield_pct')}% "
             f"저평가율={gr.get('undervaluation_pct')}%"
         )
+    st = ctx.get("stress_test_profile") or {}
+    for sc in (st.get("scenarios") or []):
+        lines.append(
+            f"WhatIf[{sc.get('label')}]: MDD={sc.get('expected_mdd_pct')}% "
+            f"VaR95={sc.get('var_95_pct')}% score={sc.get('stress_score')}"
+        )
+    if st.get("stress_test_score") is not None and not st.get("scenarios"):
+        lines.append(f"스트레스점수={st.get('stress_test_score')}/100")
     digest = (ctx.get("compact_digest") or "").strip()
     if digest:
         lines.append(f"CV합의: {digest[:180]}")
@@ -351,6 +377,16 @@ def build_rule_based_narrative(ctx: dict[str, Any]) -> str:
     elif ctx.get("sentiment_divergence_signal"):
         sent_txt = f" {ctx['sentiment_divergence_signal']}."
 
+    stress_txt = ""
+    st = ctx.get("stress_test_profile") or {}
+    worst = st.get("worst") or {}
+    if worst.get("expected_mdd_pct") is not None:
+        stress_txt = (
+            f" 만약 {worst.get('label', '역사적 위기')}급 위기가 현재 포트폴리오에 재현된다면, "
+            f"예상 최대 낙폭(MDD)은 {worst['expected_mdd_pct']:.1f}%, "
+            f"VaR(95%)는 {worst.get('var_95_pct', 0):.1f}%입니다."
+        )
+
     price = ctx.get("consensus_price")
     cp = ctx.get("change_pct")
     price_txt = f"합의가 {price}" if price else "가격 제한"
@@ -361,7 +397,7 @@ def build_rule_based_narrative(ctx: dict[str, Any]) -> str:
         f"{trend}. {vp_txt}. "
         f"재무 안정성(밸류에이션) 점수는 {val_score}점({val_grade})이며, "
         f"로컬 종합 매트릭스 점수는 {matrix}/100({mx.get('grade', 'HOLD')})입니다."
-        f"{dcf_txt}{gr_txt}{sent_txt}"
+        f"{dcf_txt}{gr_txt}{sent_txt}{stress_txt}"
     )
 
 
@@ -468,6 +504,7 @@ def refresh_local_analysis_report(
         "sentiment_golden_cross": ctx.get("sentiment_golden_cross"),
         "sentiment_divergence_signal": ctx.get("sentiment_divergence_signal"),
         "multi_agent": multi_trace if ollama_used else {},
+        "stress_test_profile": ctx.get("stress_test_profile"),
     }
 
     rep = LocalAnalysisReport(
@@ -495,6 +532,7 @@ def refresh_local_analysis_report(
         sentiment_divergence_signal=str(ctx.get("sentiment_divergence_signal") or ""),
         sentiment_ma5=ctx.get("sentiment_ma5"),
         sentiment_ma20=ctx.get("sentiment_ma20"),
+        stress_test_profile=dict(ctx.get("stress_test_profile") or {}),
         multi_agent_trace=multi_trace if ollama_used else {},
         metrics_snapshot=metrics_snapshot,
         timestamp=time.time(),
