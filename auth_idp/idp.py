@@ -85,9 +85,11 @@ class IdentityProvider:
         return {"iss": ISSUER, "sub": sub, "aud": aud, "client_id": client_id,
                 "iat": now, "nbf": now, "jti": secrets.token_urlsafe(12)}
 
-    def _issue_access(self, sub, scope, client_id) -> str:
+    def _issue_access(self, sub, scope, client_id, cnf=None) -> str:
         c = self._base_claims(sub, AUDIENCE, client_id)
         c.update({"exp": c["iat"] + ACCESS_TTL, "typ": "access", "scope": scope})
+        if cnf:                       # 기기 바인딩(RFC 7800 PoP) — 미전달 시 기존과 100% 동일
+            c["cnf"] = cnf
         return self._sign(c)
 
     def _issue_id_token(self, sub, client_id, nonce=None) -> str:
@@ -106,8 +108,8 @@ class IdentityProvider:
                             client_id=client_id, scope=scope, exp=c["exp"])
         return token
 
-    def _token_response(self, sub, scope, client_id, family_id, with_id=False, nonce=None) -> dict:
-        resp = {"access_token": self._issue_access(sub, scope, client_id),
+    def _token_response(self, sub, scope, client_id, family_id, with_id=False, nonce=None, cnf=None) -> dict:
+        resp = {"access_token": self._issue_access(sub, scope, client_id, cnf=cnf),
                 "token_type": "Bearer",
                 "expires_in": ACCESS_TTL,
                 "refresh_token": self._issue_refresh(sub, scope, client_id, family_id),
@@ -117,14 +119,14 @@ class IdentityProvider:
         return resp
 
     # ── 그랜트 ─────────────────────────────────────────────────
-    def grant_client_credentials(self, client_id, client_secret, scope=None) -> dict:
+    def grant_client_credentials(self, client_id, client_secret, scope=None, cnf=None) -> dict:
         c = self._auth_client(client_id, client_secret)
         if "client_credentials" not in c.grants:
             raise OAuthError("unauthorized_client", "허용되지 않은 그랜트", 400)
         scope = scope or c.scope
-        return self._token_response(client_id, scope, client_id, self.store.new_family())
+        return self._token_response(client_id, scope, client_id, self.store.new_family(), cnf=cnf)
 
-    def grant_authorization_code(self, client_id, client_secret, code, scope=None) -> dict:
+    def grant_authorization_code(self, client_id, client_secret, code, scope=None, cnf=None) -> dict:
         c = self._auth_client(client_id, client_secret)
         if "authorization_code" not in c.grants:
             raise OAuthError("unauthorized_client", "허용되지 않은 그랜트", 400)
@@ -136,7 +138,7 @@ class IdentityProvider:
         ctx = ctx or {}
         sub = str(ctx.get("sub") or ctx.get("user") or "jarvis-user")
         scope = scope or ctx.get("scope") or c.scope
-        return self._token_response(sub, scope, client_id, self.store.new_family(), with_id=True)
+        return self._token_response(sub, scope, client_id, self.store.new_family(), with_id=True, cnf=cnf)
 
     def grant_refresh_token(self, client_id, client_secret, refresh_token) -> dict:
         c = self._auth_client(client_id, client_secret)

@@ -791,7 +791,8 @@ _USER_PATH_RES = [
 # 민감 키워드 = 값 형태 (api_key: xxx, SECRET=yyy, token => zzz ...) → 값 마스킹
 _SENSITIVE_KV_RE = re.compile(
     r"(?i)\b(api[_-]?key|secret|secret[_-]?key|token|access[_-]?token|refresh[_-]?token"
-    r"|password|passwd|pwd|authorization|bearer|private[_-]?key|client[_-]?secret)\b"
+    r"|password|passwd|pwd|authorization|bearer|private[_-]?key|client[_-]?secret"
+    r"|x[_-]?jarvis[_-]?proof|device[_-]?proof|proof|signature)\b"
     r"\s*[:=>]+\s*['\"]?[^\s'\"]+"
 )
 _MASK = "[MASKED]"
