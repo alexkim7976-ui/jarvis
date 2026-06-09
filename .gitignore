@@ -61,3 +61,6 @@ venv/
 .logs/
 .cache/
 .mplcache/
+
+# HUD 테스트 자동 생성 렌더 산출물 (test_dynamic_hud 가 매 실행마다 재생성)
+hud_dump/
