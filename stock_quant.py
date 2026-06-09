@@ -667,6 +667,14 @@ def fetch_stock_data(ticker: str, period="6mo"):
             "avg_volume": info.get("averageVolume", 0),
             "sector": info.get("sector", ""),
             "industry": info.get("industry", ""),
+            # 로컬 DCF·Graham 입력
+            "fcf": info.get("freeCashflow"),
+            "total_debt": info.get("totalDebt"),
+            "cash": info.get("totalCash") or info.get("cash"),
+            "shares_outstanding": info.get("sharesOutstanding"),
+            "fcf_growth": (info.get("revenueGrowth", 0) or 0) * 100,
+            "earnings_growth": (info.get("earningsGrowth", 0) or 0) * 100
+            if info.get("earningsGrowth") is not None else None,
         }
 
         return df, fundamentals, None

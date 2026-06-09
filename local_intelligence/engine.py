@@ -41,6 +41,14 @@ class LocalAnalysisReport:
     compact_context: str
     sources_ok: list[str] = field(default_factory=list)
     ollama_used: bool = False
+    gemini_called: bool = False
+    volume_profile: dict = field(default_factory=dict)
+    ma_ribbon: dict = field(default_factory=dict)
+    valuation: dict = field(default_factory=dict)
+    local_matrix: dict = field(default_factory=dict)
+    dcf_valuation: dict = field(default_factory=dict)
+    graham_valuation: dict = field(default_factory=dict)
+    metrics_snapshot: dict = field(default_factory=dict)
     timestamp: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -58,6 +66,16 @@ class LocalAnalysisReport:
             "compact_context": self.compact_context,
             "sources_ok": self.sources_ok,
             "ollama_used": self.ollama_used,
+            "gemini_called": False,
+            "volume_profile": self.volume_profile,
+            "ma_ribbon": self.ma_ribbon,
+            "valuation": self.valuation,
+            "local_matrix": self.local_matrix,
+            "dcf_valuation": self.dcf_valuation,
+            "graham_valuation": self.graham_valuation,
+            "local_matrix_score": self.local_matrix.get("local_matrix_score"),
+            "local_matrix_grade": self.local_matrix.get("grade"),
+            "metrics_snapshot": self.metrics_snapshot,
             "timestamp": int(self.timestamp or time.time()),
         }
 
@@ -113,10 +131,9 @@ def gather_fusion_context(query: str, *, timeout: float = 12.0) -> dict[str, Any
     try:
         from local_rule_engine import analyze_ticker_local
         cp = market_snap.consensus_change_pct if market_snap else 0.0
-        price = market_snap.consensus_price if market_snap else 0.0
         lre_snap = analyze_ticker_local(
             ticker, name=name_hint or ticker,
-            change_pct=float(cp or 0), price=float(price or 0),
+            change_pct=float(cp or 0),
         )
     except Exception:
         lre_snap = None
@@ -124,6 +141,12 @@ def gather_fusion_context(query: str, *, timeout: float = 12.0) -> dict[str, Any
     tech_values = (lre_snap.tech_values if lre_snap else {}) or {}
     rsi = float(tech_values.get("rsi") or (lre_snap.rsi if lre_snap else 0) or 0)
     hybrid = int(lre_snap.hybrid_score if lre_snap else 0)
+    volume_profile = (lre_snap.volume_profile if lre_snap else {}) or {}
+    ma_ribbon = (lre_snap.ma_ribbon if lre_snap else {}) or {}
+    valuation = (lre_snap.valuation if lre_snap else {}) or {}
+    local_matrix = (lre_snap.local_matrix if lre_snap else {}) or {}
+    dcf_valuation = (lre_snap.dcf_valuation if lre_snap else {}) or {}
+    graham_valuation = (lre_snap.graham_valuation if lre_snap else {}) or {}
 
     return {
         "ticker": ticker,
@@ -131,11 +154,13 @@ def gather_fusion_context(query: str, *, timeout: float = 12.0) -> dict[str, Any
         "name": (lre_snap.name if lre_snap else None) or name_hint or ticker,
         "consensus_price": (
             market_snap.consensus_price if market_snap else
-            (cv_snap or {}).get("consensus_price")
+            (cv_snap or {}).get("consensus_price") or
+            (lre_snap.price if lre_snap else None)
         ),
         "change_pct": (
             market_snap.consensus_change_pct if market_snap else
-            (cv_snap or {}).get("consensus_change_pct")
+            (cv_snap or {}).get("consensus_change_pct") or
+            (lre_snap.change_pct if lre_snap else None)
         ),
         "compact_digest": (
             (market_snap.compact_digest if market_snap else "") or
@@ -155,6 +180,14 @@ def gather_fusion_context(query: str, *, timeout: float = 12.0) -> dict[str, Any
         "bb_squeeze": _detect_bb_squeeze(tech_values),
         "tech_signals": (lre_snap.tech_signals if lre_snap else {}) or {},
         "timeline_text": (market_snap.timeline_text if market_snap else "") or "",
+        "volume_profile": volume_profile,
+        "ma_ribbon": ma_ribbon,
+        "valuation": valuation,
+        "local_matrix": local_matrix,
+        "dcf_valuation": dcf_valuation,
+        "graham_valuation": graham_valuation,
+        "local_matrix_score": local_matrix.get("local_matrix_score"),
+        "local_matrix_grade": local_matrix.get("grade"),
         "anomaly_flag": bool(
             (market_snap.anomaly_flag if market_snap else False) or
             (lre_snap.anomaly.triggered if lre_snap else False)
@@ -163,51 +196,130 @@ def gather_fusion_context(query: str, *, timeout: float = 12.0) -> dict[str, Any
 
 
 def build_compact_context(ctx: dict[str, Any]) -> str:
-    """Ollama/Gemini 공통 — raw OHLCV 배제 컴팩트 컨텍스트."""
-    parts = [
-        f"{ctx.get('name')}({ctx.get('ticker')})",
-        f"합의가 {ctx.get('consensus_price')}",
-        f"변동 {ctx.get('change_pct'):+.1f}%" if ctx.get("change_pct") is not None else "",
-        f"RSI {ctx.get('rsi', 0):.0f}",
-        f"퀀트점수 {ctx.get('hybrid_score')}/100",
-        f"BB스퀴즈 {'Y' if ctx.get('bb_squeeze') else 'N'}",
-        f"감성 {ctx.get('sentiment_score', 0):+d}",
+    """Ollama 전용 — raw OHLCV 배제, 확장 지표 수치 스냅샷."""
+    vp = ctx.get("volume_profile") or {}
+    rb = ctx.get("ma_ribbon") or {}
+    val = ctx.get("valuation") or {}
+    mx = ctx.get("local_matrix") or {}
+    dcf = ctx.get("dcf_valuation") or {}
+    gr = ctx.get("graham_valuation") or {}
+
+    lines = [
+        f"종목: {ctx.get('name')}({ctx.get('ticker')})",
+        f"합의가: {ctx.get('consensus_price')} | 변동: {ctx.get('change_pct'):+.1f}%"
+        if ctx.get("change_pct") is not None else f"합의가: {ctx.get('consensus_price')}",
+        f"RSI: {ctx.get('rsi', 0):.0f} | hybrid: {ctx.get('hybrid_score')}/100",
+        f"BB스퀴즈: {'Y' if ctx.get('bb_squeeze') else 'N'} | 뉴스감성: {ctx.get('sentiment_score', 0):+d}",
     ]
+    if vp.get("poc"):
+        lines.append(
+            f"매물대 POC={vp.get('poc')} 지지={vp.get('support')} 저항={vp.get('resistance')} | {vp.get('signal', '')[:50]}"
+        )
+    if rb.get("spread_pct") is not None:
+        lines.append(
+            f"이평선 밀집도 spread={rb.get('spread_pct')}% state={rb.get('state')} | {rb.get('signal', '')[:50]}"
+        )
+    if val.get("score") is not None:
+        lines.append(
+            f"밸류에이션 점수={val.get('score')}/100 ({val.get('grade')}) "
+            f"PER={val.get('per')} PBR={val.get('pbr')} ROE={val.get('roe')}%"
+        )
+    if mx.get("local_matrix_score") is not None:
+        layers = mx.get("layers") or {}
+        lines.append(
+            f"로컬종합매트릭스={mx.get('local_matrix_score')}/100 ({mx.get('grade')}) "
+            f"[기술{layers.get('technical', {}).get('score', '?')}+"
+            f"재무{layers.get('fundamental', {}).get('score', '?')}+"
+            f"고래{layers.get('whale', {}).get('score', '?')}+"
+            f"소셜{layers.get('social', {}).get('score', '?')}]"
+        )
+    if dcf.get("fair_price") is not None:
+        lines.append(
+            f"DCF적정주가=${dcf.get('fair_price')} "
+            f"WACC={dcf.get('wacc_pct')}% "
+            f"안전마진={dcf.get('margin_of_safety_pct')}% "
+            f"({dcf.get('signal', '')[:40]})"
+        )
+    if gr.get("intrinsic_value") is not None:
+        lines.append(
+            f"그레이엄내재가치=${gr.get('intrinsic_value')} "
+            f"EPS={gr.get('eps')} g={gr.get('growth_pct')}% Y={gr.get('treasury_yield_pct')}% "
+            f"저평가율={gr.get('undervaluation_pct')}%"
+        )
     digest = (ctx.get("compact_digest") or "").strip()
     if digest:
-        parts.append(digest[:200])
-    return ". ".join(p for p in parts if p)
+        lines.append(f"CV합의: {digest[:180]}")
+    return "\n".join(lines)
 
 
 def build_rule_based_narrative(ctx: dict[str, Any]) -> str:
-    """Ollama 불가 시 deterministic 1차 브리핑 — Gemini 0."""
+    """Ollama 불가 시 deterministic 전문 브리핑 — Gemini 0."""
     nm = ctx.get("name") or ctx.get("ticker")
-    pos = "중립"
-    rsi = float(ctx.get("rsi") or 50)
-    if rsi <= 30:
-        pos = "과매도 구간 — 반등 관찰"
-    elif rsi >= 70:
-        pos = "과매수 구간 — 조정 주의"
-    elif ctx.get("bb_squeeze"):
-        pos = "볼린저 스퀴즈 — 변동성 확대 임박"
+    vp = ctx.get("volume_profile") or {}
+    rb = ctx.get("ma_ribbon") or {}
+    val = ctx.get("valuation") or {}
+    mx = ctx.get("local_matrix") or {}
+    dcf = ctx.get("dcf_valuation") or {}
+    gr = ctx.get("graham_valuation") or {}
 
-    sent = int(ctx.get("sentiment_score") or 0)
-    sent_txt = "뉴스 톤 중립"
-    if sent >= 4:
-        sent_txt = "호재성 뉴스 우세"
-    elif sent <= -4:
-        sent_txt = "악재성 뉴스 우세"
+    trend = rb.get("signal") or "이평선 중립"
+    vp_txt = vp.get("signal") or "매물대 데이터 제한"
+    val_score = val.get("score", 50)
+    val_grade = val.get("grade", "중립")
+    matrix = mx.get("local_matrix_score", ctx.get("hybrid_score", 50))
+
+    dcf_txt = ""
+    if dcf.get("fair_price") is not None:
+        mos = dcf.get("margin_of_safety_pct")
+        dcf_txt = (
+            f" DCF 기준 적정 주가는 ${dcf['fair_price']:.2f}이며, "
+            f"현재가 대비 안전마진은 {mos:+.1f}%입니다."
+            if mos is not None else
+            f" DCF 기준 적정 주가는 ${dcf['fair_price']:.2f}입니다."
+        )
+
+    gr_txt = ""
+    if gr.get("intrinsic_value") is not None:
+        uv = gr.get("undervaluation_pct")
+        gr_txt = (
+            f" 그레이엄 내재가치 ${gr['intrinsic_value']:.2f}, 저평가율 {uv:+.1f}%입니다."
+            if uv is not None else
+            f" 그레이엄 내재가치 ${gr['intrinsic_value']:.2f}입니다."
+        )
 
     price = ctx.get("consensus_price")
     cp = ctx.get("change_pct")
-    price_txt = f"합의가 {price}" if price else "가격 데이터 제한"
+    price_txt = f"합의가 {price}" if price else "가격 제한"
     ch_txt = f", 전일대비 {cp:+.1f}%" if cp is not None else ""
 
     return (
-        f"선생님, {nm} 로컬 분석입니다. {price_txt}{ch_txt}. "
-        f"RSI {rsi:.0f} 기준 {pos}. {sent_txt}. "
-        f"퀀트 통합점수 {ctx.get('hybrid_score', 0)}/100."
+        f"선생님, {nm} 로컬 정밀 분석입니다. {price_txt}{ch_txt}. "
+        f"{trend}. {vp_txt}. "
+        f"재무 안정성(밸류에이션) 점수는 {val_score}점({val_grade})이며, "
+        f"로컬 종합 매트릭스 점수는 {matrix}/100({mx.get('grade', 'HOLD')})입니다."
+        f"{dcf_txt}{gr_txt}"
     )
+
+
+_OLLAMA_NARRATIVE_PROMPT = """당신은 Apple Silicon 로컬 퀀트 애널리스트입니다.
+아래 수치 스냅샷만 사용해 한국어 3~4문장 전문 브리핑을 작성하세요.
+
+반드시 포함:
+1) 이평선 밀집/수렴·돌파 상태
+2) 매물대(POC) 지지·저항
+3) 재무 밸류에이션 점수
+4) 로컬 종합 매트릭스 점수
+5) DCF 적정 주가 및 안전마진(%)
+6) 그레이엄 내재가치 및 저평가율(%)
+
+규칙:
+- '선생님,'으로 시작
+- 컨텍스트에 없는 숫자 invent 금지
+- Gemini/클라우드 API 언급 금지
+
+[로컬 지표 스냅샷]
+{context}
+"""
 
 
 def run_ollama_qualitative_analysis(compact_context: str) -> tuple[str, bool]:
@@ -226,12 +338,7 @@ def run_ollama_qualitative_analysis(compact_context: str) -> tuple[str, bool]:
 
     url = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
     model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_K_M")
-    prompt = (
-        "당신은 로컬 주식 분석 어시스턴트입니다. 아래 컨텍스트만 사용해 "
-        "한국어 2~3문장으로 포지션·볼린저·퀀트/감성 요약을 작성하세요. "
-        "숫자는 컨텍스트에 있는 값만 사용.\n\n"
-        f"{compact_context}"
-    )
+    prompt = _OLLAMA_NARRATIVE_PROMPT.format(context=compact_context)
     try:
         import requests
         r = requests.post(
@@ -273,6 +380,21 @@ def refresh_local_analysis_report(
     if not narrative:
         narrative = build_rule_based_narrative(ctx)
 
+    metrics_snapshot = {
+        "consensus_price": ctx.get("consensus_price"),
+        "change_pct": ctx.get("change_pct"),
+        "rsi": ctx.get("rsi"),
+        "hybrid_score": ctx.get("hybrid_score"),
+        "volume_profile": ctx.get("volume_profile"),
+        "ma_ribbon": ctx.get("ma_ribbon"),
+        "valuation": ctx.get("valuation"),
+        "dcf_valuation": ctx.get("dcf_valuation"),
+        "graham_valuation": ctx.get("graham_valuation"),
+        "local_matrix_score": ctx.get("local_matrix_score"),
+        "local_matrix_grade": ctx.get("local_matrix_grade"),
+        "sentiment_score": ctx.get("sentiment_score"),
+    }
+
     rep = LocalAnalysisReport(
         ticker=str(ctx.get("ticker") or ""),
         query=query,
@@ -287,6 +409,14 @@ def refresh_local_analysis_report(
         compact_context=compact,
         sources_ok=list(ctx.get("sources_ok") or []),
         ollama_used=ollama_used,
+        gemini_called=False,
+        volume_profile=dict(ctx.get("volume_profile") or {}),
+        ma_ribbon=dict(ctx.get("ma_ribbon") or {}),
+        valuation=dict(ctx.get("valuation") or {}),
+        local_matrix=dict(ctx.get("local_matrix") or {}),
+        dcf_valuation=dict(ctx.get("dcf_valuation") or {}),
+        graham_valuation=dict(ctx.get("graham_valuation") or {}),
+        metrics_snapshot=metrics_snapshot,
         timestamp=time.time(),
     )
     upsert_report(rep.to_dict())
