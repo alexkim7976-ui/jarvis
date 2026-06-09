@@ -52,6 +52,7 @@ class LocalAnalysisReport:
     sentiment_divergence_signal: str = ""
     sentiment_ma5: float | None = None
     sentiment_ma20: float | None = None
+    multi_agent_trace: dict = field(default_factory=dict)
     metrics_snapshot: dict = field(default_factory=dict)
     timestamp: float = 0.0
 
@@ -81,6 +82,7 @@ class LocalAnalysisReport:
             "sentiment_divergence_signal": self.sentiment_divergence_signal,
             "sentiment_ma5": self.sentiment_ma5,
             "sentiment_ma20": self.sentiment_ma20,
+            "multi_agent_trace": self.multi_agent_trace,
             "local_matrix_score": self.local_matrix.get("local_matrix_score"),
             "local_matrix_grade": self.local_matrix.get("grade"),
             "metrics_snapshot": self.metrics_snapshot,
@@ -364,40 +366,44 @@ def build_rule_based_narrative(ctx: dict[str, Any]) -> str:
 
 
 _OLLAMA_NARRATIVE_PROMPT = """당신은 Apple Silicon 로컬 퀀트 애널리스트입니다.
-아래 수치 스냅샷만 사용해 한국어 3~4문장 전문 브리핑을 작성하세요.
-
-반드시 포함:
-1) 이평선 밀집/수렴·돌파 상태
-2) 매물대(POC) 지지·저항
-3) 재무 밸류에이션 점수
-4) 로컬 종합 매트릭스 점수
-5) DCF 적정 주가 및 안전마진(%)
-6) 그레이엄 내재가치 및 저평가율(%)
-7) 뉴스 감성 MA5/MA20, 골든크로스, 강세 다이버전스
-
-규칙:
-- '선생님,'으로 시작
-- 컨텍스트에 없는 숫자 invent 금지
-- Gemini/클라우드 API 언급 금지
+(레거시 단발 프롬프트 — LOCAL_INTEL_MULTI_AGENT=0 일 때만 사용)
 
 [로컬 지표 스냅샷]
 {context}
 """
 
 
-def run_ollama_qualitative_analysis(compact_context: str) -> tuple[str, bool]:
+def run_ollama_qualitative_analysis(
+    compact_context: str,
+    ctx: dict[str, Any] | None = None,
+) -> tuple[str, bool, dict[str, Any]]:
     """
-    Ollama 정성 평가 — compact_context 만 전달.
-    Returns: (narrative, ollama_used)
+    Multi-Persona CoT (기본) 또는 레거시 단발 Ollama.
+    Returns: (narrative, ollama_used, multi_agent_trace)
     """
+    trace: dict[str, Any] = {}
     if not compact_context:
-        return "", False
+        return "", False, trace
 
+    from .multi_agent import multi_agent_enabled, run_multi_agent_cot
+
+    if multi_agent_enabled() and ctx:
+        narrative, used, trace = run_multi_agent_cot(
+            ctx, compact_context, legacy_ollama_fn=_ollama_fn,
+        )
+        if narrative:
+            return narrative, used, trace
+        return "", False, trace
+
+    # 레거시 단발 (MULTI_AGENT=0 또는 ctx 없음)
     if _ollama_fn:
         try:
-            return _ollama_fn(compact_context), True
+            msg = (_ollama_fn(compact_context) or "").strip()
+            if msg:
+                return msg[:800], True, trace
         except Exception:
-            return "", False
+            pass
+        return "", False, trace
 
     url = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
     model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_K_M")
@@ -417,10 +423,10 @@ def run_ollama_qualitative_analysis(compact_context: str) -> tuple[str, bool]:
         r.raise_for_status()
         msg = r.json().get("message", {}).get("content", "").strip()
         if msg:
-            return msg[:800], True
+            return msg[:800], True, trace
     except Exception:
         pass
-    return "", False
+    return "", False, trace
 
 
 def refresh_local_analysis_report(
@@ -435,10 +441,11 @@ def refresh_local_analysis_report(
 
     narrative = ""
     ollama_used = False
+    multi_trace: dict[str, Any] = {}
     if force_ollama and os.getenv("LOCAL_INTEL_OLLAMA_ENABLED", "1").strip().lower() not in (
         "0", "false", "no", "off",
     ):
-        narrative, ollama_used = run_ollama_qualitative_analysis(compact)
+        narrative, ollama_used, multi_trace = run_ollama_qualitative_analysis(compact, ctx)
 
     if not narrative:
         narrative = build_rule_based_narrative(ctx)
@@ -460,6 +467,7 @@ def refresh_local_analysis_report(
         "sentiment_ma20": ctx.get("sentiment_ma20"),
         "sentiment_golden_cross": ctx.get("sentiment_golden_cross"),
         "sentiment_divergence_signal": ctx.get("sentiment_divergence_signal"),
+        "multi_agent": multi_trace if ollama_used else {},
     }
 
     rep = LocalAnalysisReport(
@@ -487,6 +495,7 @@ def refresh_local_analysis_report(
         sentiment_divergence_signal=str(ctx.get("sentiment_divergence_signal") or ""),
         sentiment_ma5=ctx.get("sentiment_ma5"),
         sentiment_ma20=ctx.get("sentiment_ma20"),
+        multi_agent_trace=multi_trace if ollama_used else {},
         metrics_snapshot=metrics_snapshot,
         timestamp=time.time(),
     )
