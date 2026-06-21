@@ -47,6 +47,15 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Java / Maven 빌드 산출물 (supply-chain-agent — 컴파일 결과는 재생성되므로 커밋 금지)
+target/
+*.class
+*.jar
+*.war
 
 # IDE
 .idea/
