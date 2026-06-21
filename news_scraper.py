@@ -32,8 +32,16 @@ import re
 import time
 import urllib.parse
 import urllib.request
-import xml.etree.ElementTree as ET
 from datetime import datetime
+
+# 보안: stdlib xml.etree는 billion-laughs(엔티티 폭발)·외부 엔티티에 취약.
+# 원격 RSS를 파싱하므로 defusedxml로 대체(미설치 시 폴백 + 파싱 시 경고).
+try:
+    from defusedxml import ElementTree as ET   # type: ignore
+    _XML_HARDENED = True
+except ImportError:
+    from xml.etree import ElementTree as ET
+    _XML_HARDENED = False
 
 import requests
 try:
@@ -137,6 +145,8 @@ def _parse_rss(xml_bytes: bytes, max_items: int = 5) -> list[dict]:
     [{"title", "summary", "link", "source", "published"}, ...]
     """
     items: list[dict] = []
+    if not _XML_HARDENED:
+        _log("WARN", "defusedxml 미설치 — XML 엔티티 폭발 보호 비활성(pip install defusedxml 권장)")
     try:
         root = ET.fromstring(xml_bytes)
     except ET.ParseError as e:

@@ -25,8 +25,16 @@ import os
 import re
 import time
 import threading
-import xml.etree.ElementTree as ET
 from collections import deque
+
+# 보안: stdlib xml.etree는 billion-laughs(엔티티 폭발)·외부 엔티티에 취약.
+# 원격 SEC 13F XML을 파싱하므로 defusedxml로 대체(미설치 시 폴백 + 파싱 시 경고).
+try:
+    from defusedxml import ElementTree as ET   # type: ignore
+    _XML_HARDENED = True
+except ImportError:
+    from xml.etree import ElementTree as ET
+    _XML_HARDENED = False
 from datetime import datetime
 from typing import Optional
 
@@ -191,6 +199,8 @@ def _fetch_sec_13f_portfolio(cik: str, display_name: str) -> list[dict]:
         resp = net.get(xml_url, headers=_headers(), timeout=(5, 25))
         if resp.status_code != 200:
             return []
+        if not _XML_HARDENED:
+            _log("⚠ defusedxml 미설치 — XML 엔티티 폭발 보호 비활성(pip install defusedxml 권장)")
         root = ET.fromstring(resp.content)
         holdings = []
         for info in root.iter():
