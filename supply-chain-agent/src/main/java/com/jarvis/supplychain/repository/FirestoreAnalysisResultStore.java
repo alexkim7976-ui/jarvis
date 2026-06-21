@@ -113,7 +113,8 @@ public class FirestoreAnalysisResultStore implements AnalysisResultStore {
                 .map(m -> new ValueChainImpact(
                         (String) m.get("companyName"),
                         (String) m.get("ticker"),
-                        ValueChainImpact.ImpactType.valueOf((String) m.get("impactType")),
+                        safeEnum(ValueChainImpact.ImpactType.class, (String) m.get("impactType"),
+                                ValueChainImpact.ImpactType.NEUTRAL),
                         ((Number) m.getOrDefault("impactScore", 0)).intValue(),
                         (String) m.get("rationale"),
                         (String) m.get("sector")
@@ -133,5 +134,17 @@ public class FirestoreAnalysisResultStore implements AnalysisResultStore {
                 ((Number) data.getOrDefault("confidence", 0.5)).doubleValue(),
                 Instant.parse((String) data.get("analyzedAt"))
         );
+    }
+
+    /** 신뢰할 수 없는 저장소 문자열을 enum 으로 안전 변환 — 미정의 값/널은 폴백으로 흡수(DoS 차단). */
+    private static <E extends Enum<E>> E safeEnum(Class<E> type, String raw, E fallback) {
+        if (raw == null) {
+            return fallback;
+        }
+        try {
+            return Enum.valueOf(type, raw.trim());
+        } catch (IllegalArgumentException e) {
+            return fallback;
+        }
     }
 }

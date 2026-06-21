@@ -2,16 +2,18 @@
 J.A.R.V.I.S — 경량 OIDC IDP 코어 (Authorization Server)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 인증 서버(AS) 책임만 담당:
-  · 클라이언트 자격 검증(client_secret 상수시간 비교)
+  · 클라이언트 자격 검증(client_secret → Argon2id 해시 + 상수시간 검증)
   · 3대 그랜트: client_credentials / authorization_code / refresh_token(RTR)
   · RS256(비대칭) 토큰 발급 + 검증
 자원 서버(RS)는 verify_access() 만 호출 → AS 와 논리적으로 분리.
 """
 from __future__ import annotations
-import os, time, secrets, hmac, hashlib
+import os, time, secrets
 from dataclasses import dataclass
 
 import jwt  # PyJWT
+from argon2 import PasswordHasher, Type  # argon2-cffi
+from argon2.exceptions import VerificationError, VerifyMismatchError, InvalidHashError
 
 from .keys import KeyManager
 from .store import RefreshTokenStore
@@ -32,8 +34,23 @@ class OAuthError(Exception):
         self.status = status
 
 
+# Argon2id — 하드웨어 동원 무차별 대입(덤프) 공격 대응. 매 해시마다 salt 내장 →
+# 레인보우/사전 공격 무력화. 파라미터는 argon2-cffi 기본값(time_cost=3,
+# memory_cost=64MiB, parallelism=4)에 type=ID(Argon2id) 명시.
+_ph = PasswordHasher(type=Type.ID)
+
+
 def _hash_secret(secret: str) -> str:
-    return hashlib.sha256((secret or "").encode()).hexdigest()
+    """클라이언트 시크릿 → Argon2id 해시. 검증은 반드시 _verify_secret 사용."""
+    return _ph.hash(secret or "")
+
+
+def _verify_secret(stored_hash: str, secret: str) -> bool:
+    """Argon2id 상수시간 검증. 불일치·손상 해시는 모두 False로 흡수."""
+    try:
+        return _ph.verify(stored_hash, secret or "")
+    except (VerifyMismatchError, InvalidHashError, VerificationError):
+        return False
 
 
 @dataclass
@@ -68,7 +85,7 @@ class IdentityProvider:
         if not c:
             raise OAuthError("invalid_client", "알 수 없는 클라이언트", 401)
         if c.confidential:
-            if not secret or not hmac.compare_digest(c.secret_hash, _hash_secret(secret)):
+            if not secret or not _verify_secret(c.secret_hash, secret):
                 raise OAuthError("invalid_client", "클라이언트 시크릿 불일치", 401)
         return c
 

@@ -24,9 +24,10 @@ import java.util.Map;
  * <p>방어 계층:
  * <ul>
  *   <li>1차 — server.address=127.0.0.1 로 LAN 외부 노출 차단(application.yml).</li>
- *   <li>2차 — SUPPLY_CHAIN_API_KEY 설정 시 /health 외 모든 요청에 일치하는 헤더 요구.</li>
+ *   <li>2차 — /health 외 모든 요청에 일치하는 X-API-Key 헤더 요구.</li>
  * </ul>
- * 키 미설정 시에는 인증을 건너뛰고(로컬 바인딩에만 의존) 경고를 남긴다.
+ * 제로 트러스트 정책: 키가 미설정/빈 값이면 인증을 건너뛰지 않고 필터 초기화 단계에서
+ * {@link IllegalStateException} 을 던져 애플리케이션 기동 자체를 차단한다(Fail-Fast).
  */
 @Component
 public class ApiKeyAuthFilter extends OncePerRequestFilter {
@@ -40,19 +41,18 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
     public ApiKeyAuthFilter(@Value("${supply-chain.security.api-key:}") String configuredKey) {
         this.configuredKey = configuredKey == null ? "" : configuredKey.trim();
         if (this.configuredKey.isBlank()) {
-            log.warn("SUPPLY_CHAIN_API_KEY 미설정 — API 인증 비활성(127.0.0.1 바인딩에만 의존). 운영 환경에서는 키 설정을 권장합니다.");
-        } else {
-            log.info("API 키 인증 활성화 — /health 외 모든 엔드포인트에 X-API-Key 헤더 필요");
+            // Fail-Fast: 키 없이는 빈(bean) 생성 → 스프링 컨텍스트 기동을 모두 중단.
+            throw new IllegalStateException(
+                    "SUPPLY_CHAIN_API_KEY 미설정 — 제로 트러스트 정책상 API 키 없이는 기동할 수 없습니다. "
+                    + "환경변수 SUPPLY_CHAIN_API_KEY 를 설정한 뒤 다시 시작하세요.");
         }
+        log.info("API 키 인증 활성화 — /health 외 모든 엔드포인트에 X-API-Key 헤더 필요");
     }
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        if (configuredKey.isBlank()) {
-            return true; // 키 미설정 → 인증 스킵
-        }
         String path = request.getRequestURI();
-        return path != null && path.endsWith("/health"); // 헬스체크는 공개
+        return path != null && path.endsWith("/health"); // 헬스체크만 공개
     }
 
     @Override

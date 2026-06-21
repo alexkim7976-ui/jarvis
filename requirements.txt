@@ -42,3 +42,11 @@ beautifulsoup4>=4.12.0
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 # httpx 는 fastapi TestClient(검증 스크립트)용 — uvicorn[standard]가 websockets 포함
+
+# ── 경량 OIDC IDP (auth_idp) ──
+PyJWT>=2.8.0
+# 클라이언트 시크릿 Argon2id 해싱·검증 (하드웨어 무차별 대입 덤프 공격 대응)
+argon2-cffi>=23.1.0
+
+# ── 보안: 신뢰할 수 없는 원격 XML(RSS·SEC 13F) 엔티티 폭발 방어 ──
+defusedxml>=0.7.1

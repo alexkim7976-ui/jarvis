@@ -70,7 +70,8 @@ public class FirestoreSourceDocumentStore implements SourceDocumentStore {
                     (String) d.get("title"),
                     (String) d.get("bodyText"),
                     (String) d.get("source"),
-                    SourceDocument.SourceType.valueOf((String) d.get("sourceType")),
+                    safeEnum(SourceDocument.SourceType.class, (String) d.get("sourceType"),
+                            SourceDocument.SourceType.NEWS),
                     (String) d.get("url"),
                     (String) d.get("language"),
                     java.time.Instant.parse((String) d.get("collectedAt"))
@@ -80,6 +81,18 @@ public class FirestoreSourceDocumentStore implements SourceDocumentStore {
             throw new IllegalStateException("Firestore read interrupted", e);
         } catch (ExecutionException e) {
             throw new IllegalStateException("Firestore read failed", e);
+        }
+    }
+
+    /** 신뢰할 수 없는 저장소 문자열을 enum 으로 안전 변환 — 미정의 값/널은 폴백으로 흡수(DoS 차단). */
+    private static <E extends Enum<E>> E safeEnum(Class<E> type, String raw, E fallback) {
+        if (raw == null) {
+            return fallback;
+        }
+        try {
+            return Enum.valueOf(type, raw.trim());
+        } catch (IllegalArgumentException e) {
+            return fallback;
         }
     }
 }
