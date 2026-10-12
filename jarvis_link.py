@@ -200,6 +200,8 @@ class JarvisLink:
         self._approval_lock = threading.Lock()
         self._pending: dict[str, dict] = {}          # code -> {"context", "ts"}
         self._approval_q: "queue.Queue[dict]" = queue.Queue()
+        # ZFold / 모바일 → Mac: 알림 TTS·음성 명령 수신 큐
+        self._mobile_inbound_q: "queue.Queue[dict]" = queue.Queue()
         # 무차별 대입 방어: 실패 타임스탬프 슬라이딩 윈도우 + 잠금 만료 시각
         self._approval_fails: deque = deque(maxlen=256)
         self._approval_locked_until: float = 0.0
@@ -435,7 +437,57 @@ class JarvisLink:
             self._log("INTR", f"✅ 모바일 원격 리밸런싱 승인 수신 (code={_mask_code(code)})")
             return {"status": "approved", "queued": True, "code": _mask_code(code)}
 
+        @app.post("/api/mobile/notify")
+        async def _mobile_notify(request: "Request"):
+            """ZFoldMacBridge — 폴드/안드로이드 알림 → JARVIS TTS 큐."""
+            if not self._check_auth_request(request):
+                self._register_auth_fail(self._client_ip(request), "mobile_notify")
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            if not isinstance(body, dict):
+                return JSONResponse({"error": "bad_request"}, status_code=400)
+            evt = self._enqueue_mobile_inbound(body, source="rest")
+            return {"status": "queued", "id": evt.get("id")}
+
         self._app = app
+
+    def _enqueue_mobile_inbound(self, data: dict, source: str = "ws") -> dict:
+        """모바일 알림/음성 명령을 Mac 처리 큐에 적재."""
+        msg_type = str(data.get("type") or "notification").lower()
+        text = (data.get("text") or data.get("body") or data.get("message") or "").strip()
+        title = (data.get("title") or data.get("app") or "모바일").strip()
+        evt = {
+            "id": f"mob_{int(time.time() * 1000)}",
+            "type": msg_type,
+            "title": title,
+            "text": text,
+            "reply_to": data.get("reply_to") or data.get("notification_id"),
+            "source": source,
+            "ts": time.time(),
+            "raw": {k: v for k, v in data.items() if k != "token"},
+        }
+        if msg_type in ("voice_command", "reply", "command") and text:
+            evt["process_as_user"] = True
+        elif msg_type == "notification" and (text or title):
+            evt["read_aloud"] = True
+            evt["tts_text"] = f"{title}. {text}".strip(". ")
+        self._mobile_inbound_q.put(evt)
+        self.publish("mobile_inbound", evt)
+        _audit("LINK_MOBILE_INBOUND", {"type": msg_type, "title": title[:40], "source": source})
+        self._log("INFO", f"📱 모바일 수신 [{msg_type}] {title[:30]}")
+        return evt
+
+    def get_mobile_inbound_events(self) -> list:
+        out = []
+        while True:
+            try:
+                out.append(self._mobile_inbound_q.get_nowait())
+            except queue.Empty:
+                break
+        return out
 
     async def _handle_client_msg(self, ws, msg: str):
         try:
@@ -446,6 +498,14 @@ class JarvisLink:
         if data.get("type") == "ping":
             try:
                 await ws.send_json({"type": "pong", "ts": time.time()})
+            except Exception:
+                pass
+            return
+        # ZFoldMacBridge — WebSocket 알림/음성 명령
+        if data.get("type") in ("notification", "voice_command", "reply", "command", "mobile_notify"):
+            self._enqueue_mobile_inbound(data, source="ws")
+            try:
+                await ws.send_json({"type": "ack", "id": data.get("id"), "ts": time.time()})
             except Exception:
                 pass
 

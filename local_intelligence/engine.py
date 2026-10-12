@@ -393,16 +393,17 @@ def build_rule_based_narrative(ctx: dict[str, Any]) -> str:
     ch_txt = f", 전일대비 {cp:+.1f}%" if cp is not None else ""
 
     return (
-        f"선생님, {nm} 로컬 정밀 분석입니다. {price_txt}{ch_txt}. "
+        f"{nm} 쪽 봤는데요, {price_txt}{ch_txt}. "
         f"{trend}. {vp_txt}. "
-        f"재무 안정성(밸류에이션) 점수는 {val_score}점({val_grade})이며, "
-        f"로컬 종합 매트릭스 점수는 {matrix}/100({mx.get('grade', 'HOLD')})입니다."
+        f"재무 안정성 점수는 {val_score}점({val_grade})이고, "
+        f"종합 매트릭스는 {matrix}/100({mx.get('grade', 'HOLD')}) 정도예요."
         f"{dcf_txt}{gr_txt}{sent_txt}{stress_txt}"
     )
 
 
-_OLLAMA_NARRATIVE_PROMPT = """당신은 Apple Silicon 로컬 퀀트 애널리스트입니다.
-(레거시 단발 프롬프트 — LOCAL_INTEL_MULTI_AGENT=0 일 때만 사용)
+_OLLAMA_NARRATIVE_PROMPT = """Apple Silicon 로컬 퀀트 애널리스트. 음성으로 읽힐 한국어 답변.
+
+말투: 부드럽고 자연스러운 한국어 존댓말/해요체 (~예요/~해요/~네요/~죠). 반말 금지, 딱딱한 ~습니다체·번역투·번호 목록도 금지.
 
 [로컬 지표 스냅샷]
 {context}
@@ -442,24 +443,29 @@ def run_ollama_qualitative_analysis(
         return "", False, trace
 
     url = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
-    model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_K_M")
+    try:
+        from ollama_agent import get_stock_model
+        model = get_stock_model()
+    except ImportError:
+        model = os.getenv("OLLAMA_STOCK_MODEL", os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_K_M"))
     prompt = _OLLAMA_NARRATIVE_PROMPT.format(context=compact_context)
     try:
         import requests
+        from ai_accuracy import ollama_accuracy_options
         r = requests.post(
             f"{url}/api/chat",
             json={
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": False,
-                "options": {"num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "4096"))},
+                "options": ollama_accuracy_options(),
             },
-            timeout=float(os.getenv("LOCAL_INTEL_OLLAMA_TIMEOUT", "25")),
+            timeout=float(os.getenv("LOCAL_INTEL_OLLAMA_TIMEOUT", "45")),
         )
         r.raise_for_status()
         msg = r.json().get("message", {}).get("content", "").strip()
         if msg:
-            return msg[:800], True, trace
+            return msg[:1200], True, trace
     except Exception:
         pass
     return "", False, trace
@@ -483,8 +489,17 @@ def refresh_local_analysis_report(
     ):
         narrative, ollama_used, multi_trace = run_ollama_qualitative_analysis(compact, ctx)
 
+    rule_narrative = build_rule_based_narrative(ctx)
     if not narrative:
-        narrative = build_rule_based_narrative(ctx)
+        narrative = rule_narrative
+    elif ollama_used:
+        try:
+            from ai_accuracy import repair_narrative
+            narrative, _repaired = repair_narrative(
+                narrative, ctx, rule_fallback=rule_narrative,
+            )
+        except ImportError:
+            pass
 
     metrics_snapshot = {
         "consensus_price": ctx.get("consensus_price"),

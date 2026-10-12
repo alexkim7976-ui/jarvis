@@ -8,7 +8,10 @@ import pyaudio
 from voice_profile import VoiceProfile
 
 WAKE_WORD_ENABLED  = os.getenv("WAKE_WORD_ENABLED","true").lower()=="true"
-WAKE_WORDS_STR     = os.getenv("WAKE_WORDS","자비스,jarvis,쟈비스,자바스,저비스")
+WAKE_WORDS_STR     = os.getenv(
+    "WAKE_WORDS",
+    "자비스야,자비스,jarvis,hey jarvis,쟈비스,자바스,저비스",
+)
 WAKE_WORDS         = [w.strip().lower() for w in WAKE_WORDS_STR.split(",")]
 WAKE_THRESHOLD     = int(os.getenv("WAKE_WORD_THRESHOLD","600"))
 WAKE_COOLDOWN      = float(os.getenv("WAKE_WORD_COOLDOWN","3.0"))
@@ -26,12 +29,14 @@ class WakeWordDetector:
         self._client=openai_client
         self._pa=None; self._stream=None; self._thread=None; self._running=False
         self._triggered=False; self._last_trigger=0; self._lock=threading.Lock()
+        self._stream_lock=threading.RLock()  # read()와 close()/open() 직렬화 → PortAudio ring buffer use-after-free 방지
         self._check_count=0; self._detect_count=0
         self._pre_buf=collections.deque(maxlen=8)  # ~500ms 사전 버퍼 (단어 앞부분 보존)
         self.listening=False; self.last_heard=""; self.status="OFF"
         self.enabled=WAKE_WORD_ENABLED
         self.voice_profile=VoiceProfile()
         self._local_detections=0; self._api_detections=0; self._rejections=0
+        self._oww_detections=0
         self.last_rejection=""  # 마지막 거부 사유
         self._stt_busy=False  # STT 추론 중 중복 클립 방지
 
@@ -56,26 +61,39 @@ class WakeWordDetector:
             threading.Thread(target=self._ensure_model, daemon=True).start()
         self.status="LISTENING"; self.listening=True
         if self.voice_profile.trained:
-            _log("AUTH",f"음성 인증 활성 — 등록된 주인만 웨이크 가능 ({self.voice_profile._sample_count}샘플)")
+            try:
+                from voice_profile import is_known_device
+                _tag = " (등록 기기)" if is_known_device() else ""
+            except ImportError:
+                _tag = ""
+            _log("AUTH", f"음성 인증 활성 — 등록된 주인만 웨이크 가능 "
+                         f"({self.voice_profile._sample_count}샘플){_tag}")
         else:
-            _log("WARN","음성 프로필 미학습 — 누구나 웨이크 가능 (V키로 학습)")
+            try:
+                from voice_profile import is_known_device, voice_setup_required
+                if is_known_device() and not voice_setup_required(self.voice_profile):
+                    _log("AUTH", f"등록 기기 — 저장 프로필 적용 ({self.voice_profile._sample_count}샘플)")
+                else:
+                    _log("WARN", "음성 프로필 미학습 — 누구나 웨이크 가능 (V키로 학습)")
+            except ImportError:
+                _log("WARN", "음성 프로필 미학습 — 누구나 웨이크 가능 (V키로 학습)")
 
     def stop(self):
         self._running=False; self.listening=False; self.status="OFF"
         if self._thread: self._thread.join(timeout=3)
-        if self._stream:
-            try: self._stream.stop_stream(); self._stream.close()
-            except: pass
+        self._release_stream()
 
     def _release_stream(self):
-        """CoreAudio 입력 장치 점유 해제 — 녹음/TTS와 동시 오픈 시 macOS UI 프리징 방지."""
-        if self._stream:
-            try:
-                self._stream.stop_stream()
-                self._stream.close()
-            except Exception:
-                pass
-            self._stream = None
+        """CoreAudio 입력 장치 점유 해제 — 녹음/TTS와 동시 오픈 시 macOS UI 프리징 방지.
+        _stream_lock으로 in-flight read()가 끝날 때까지 대기 후 close → ring buffer use-after-free(SIGSEGV) 방지."""
+        with self._stream_lock:
+            if self._stream:
+                try:
+                    self._stream.stop_stream()
+                    self._stream.close()
+                except Exception:
+                    pass
+                self._stream = None
 
     def pause(self):
         self.listening = False
@@ -92,16 +110,25 @@ class WakeWordDetector:
 
     def _open_stream(self):
         """마이크 스트림 오픈(재오픈 포함). 장시간 실행 중 CoreAudio가 스트림을 끊으면 복구용으로 재호출된다."""
-        if self._stream:
-            try: self._stream.stop_stream(); self._stream.close()
-            except: pass
-            self._stream=None
-        try:
-            self._stream=self._pa.open(format=FORMAT,channels=CHANNELS,
-                rate=SAMPLE_RATE,input=True,frames_per_buffer=CHUNK)
-            return True
-        except Exception as e:
-            _log("WARN",f"마이크 스트림 오픈 실패: {e}"); return False
+        with self._stream_lock:
+            if self._stream:
+                try: self._stream.stop_stream(); self._stream.close()
+                except: pass
+                self._stream=None
+            try:
+                self._stream=self._pa.open(format=FORMAT,channels=CHANNELS,
+                    rate=SAMPLE_RATE,input=True,frames_per_buffer=CHUNK)
+                return True
+            except Exception as e:
+                _log("WARN",f"마이크 스트림 오픈 실패: {e}"); return False
+
+    def _read_chunk(self):
+        """스트림 read를 _stream_lock 안에서 수행 → close()/open()과 직렬화.
+        스트림이 닫혔으면 None 반환(호출부에서 재오픈/탈출 처리)."""
+        with self._stream_lock:
+            s=self._stream
+            if s is None: return None
+            return s.read(CHUNK,exception_on_overflow=False)
 
     def _listen_loop(self):
         if not self._open_stream():
@@ -116,7 +143,9 @@ class WakeWordDetector:
                     time.sleep(0.5)
                     continue
             try:
-                data=self._stream.read(CHUNK,exception_on_overflow=False)
+                data=self._read_chunk()
+                if data is None:  # pause 등으로 스트림이 닫힘 → 다음 루프에서 재오픈 판단
+                    time.sleep(0.05); continue
                 fail=0  # 정상 읽기 → 실패 카운터 리셋
                 rms=self._calc_rms(data)
                 self._pre_buf.append(data)  # 항상 버퍼링 (단어 앞부분 보존용)
@@ -128,7 +157,8 @@ class WakeWordDetector:
                 frames=list(self._pre_buf); silence=0; t0=time.time()  # 사전 버퍼 포함
                 while (time.time()-t0)<WAKE_CLIP_DURATION:
                     try:
-                        c=self._stream.read(CHUNK,exception_on_overflow=False)
+                        c=self._read_chunk()
+                        if c is None: break  # 스트림 닫힘 → 클립 캡처 중단
                         frames.append(c)
                         if self._calc_rms(c)<WAKE_THRESHOLD: silence+=1
                         else: silence=0
@@ -173,8 +203,9 @@ class WakeWordDetector:
             wav_path = self._save_temp_wav(frames)
             detected = False
             api_ok = True
+            wake_source = ""
             if wav_path:
-                detected, api_ok = self._check_whisper(wav_path)
+                detected, api_ok, wake_source = self._check_wake(audio_data, wav_path)
                 self._check_count += 1
                 try:
                     Path(wav_path).unlink()
@@ -186,6 +217,25 @@ class WakeWordDetector:
                 detected = True
 
             if detected:
+                _strict_auth = False
+                try:
+                    from security_policy import voice_auth_required
+                    _strict_auth = voice_auth_required()
+                except ImportError:
+                    pass
+                if _strict_auth:
+                    if not self.voice_profile.trained:
+                        self._rejections += 1
+                        self.last_rejection = "음성 프로필 미학습"
+                        _log("DENY", "최대 보안 — V키로 음성 등록 후 웨이크 가능")
+                        self.status = "LISTENING"
+                        return
+                    if not vp_match:
+                        self._rejections += 1
+                        self.last_rejection = f"음성 불일치 (유사도={vp_conf:.2f})"
+                        _log("DENY", f"등록된 주인 목소리 아님 (유사도={vp_conf:.2f})")
+                        self.status = "LISTENING"
+                        return
                 with self._lock:
                     self._triggered = True
                     self._last_trigger = time.time()
@@ -195,9 +245,12 @@ class WakeWordDetector:
                     else:
                         self._api_detections += 1
                 self.status = "DETECTED"
+                if wake_source == "openwakeword":
+                    self._oww_detections += 1
                 mode = (
-                    "프로필 폴백" if (not api_ok and vp_match)
-                    else ("학습" if self.voice_profile.trained else "미학습")
+                    "openWakeWord" if wake_source == "openwakeword"
+                    else ("프로필 폴백" if (not api_ok and vp_match)
+                    else ("학습" if self.voice_profile.trained else "미학습"))
                 )
                 _log("WAKE", f"감지 ({mode}, heard='{self.last_heard}')")
             else:
@@ -217,40 +270,55 @@ class WakeWordDetector:
             _log("WARN",f"Whisper 모델 로드 실패: {e}"); self._fw_model=None
         return self._fw_model
 
-    def _check_whisper(self, wav_path):
-        """Returns (detected: bool, api_ok: bool). stt_backend가 local/api 모드를 선택."""
+    def _check_wake(self, pcm_bytes, wav_path):
+        """Returns (detected, api_ok, source). openWakeWord → Whisper fuzzy 순."""
+        try:
+            from wake_engine import detect_wake_from_pcm, oww_enabled, get_oww_frontend
+            if oww_enabled():
+                get_oww_frontend().load()
+            oww_hit, src, detail = detect_wake_from_pcm(
+                pcm_bytes, stt_text="", wake_words=WAKE_WORDS,
+            )
+            if oww_hit:
+                self.last_heard = detail or "hey jarvis"
+                return True, True, src
+        except ImportError:
+            pass
+
         try:
             from stt_backend import transcribe_wake_clip
             detected, api_ok, text = transcribe_wake_clip(wav_path, self._client, WAKE_WORDS)
             self.last_heard = text
-            return detected, api_ok
+            return detected, api_ok, "whisper" if detected else ""
         except ImportError:
             pass
         # 폴백: 기존 인라인 로직
         model=self._ensure_model()
         if model is not None:
             try:
+                from wake_engine import matches_wake_word
                 segments,_=model.transcribe(wav_path, language="ko",
                     beam_size=1, condition_on_previous_text=False)
                 text=" ".join(seg.text.strip() for seg in segments).strip().lower()
                 self.last_heard=text
-                if not text: return False, True
-                for w in WAKE_WORDS:
-                    if w in text: return True, True
-                return False, True
+                if not text: return False, True, ""
+                if matches_wake_word(text, WAKE_WORDS):
+                    return True, True, "whisper"
+                return False, True, ""
             except Exception as e:
                 _log("WARN", f"로컬 Whisper 실패: {e}")
         try:
+            from wake_engine import matches_wake_word
             with open(wav_path,"rb") as f:
                 r=self._client.audio.transcriptions.create(
                     model="whisper-1",file=f,response_format="text",language="ko")
             text=r.strip().lower(); self.last_heard=text
-            if not text: return False, True
-            for w in WAKE_WORDS:
-                if w in text: return True, True
-            return False, True
+            if not text: return False, True, ""
+            if matches_wake_word(text, WAKE_WORDS):
+                return True, True, "whisper"
+            return False, True, ""
         except Exception as e:
-            _log("WARN",f"Whisper API 실패: {e}"); return False, False
+            _log("WARN",f"Whisper API 실패: {e}"); return False, False, ""
 
     def _save_temp_wav(self, frames):
         if not frames: return None
@@ -275,6 +343,7 @@ class WakeWordDetector:
     def stats(self):
         return {"enabled":self.enabled,"status":self.status,
                 "total":self._detect_count,"local":self._local_detections,
-                "api":self._api_detections,"rejections":self._rejections,
+                "api":self._api_detections,"oww":self._oww_detections,
+                "rejections":self._rejections,
                 "voice_trained":self.voice_profile.trained,
                 "voice_samples":self.voice_profile._sample_count}

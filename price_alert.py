@@ -16,8 +16,9 @@ stock_quant.py 의 지표 연산(compute_technical_snapshot)을 재사용한다.
 
 의존성: pip install yfinance pandas numpy
 """
-
 from __future__ import annotations
+
+from speech_style import USER_DISPLAY_NAME
 
 import os
 import json
@@ -261,7 +262,7 @@ class PriceAlertWorker:
         _log(f"🎯 목표가 설정: {name}({ticker}) {ps} {arrow}{' (갱신)' if updated else ''}")
         return {"success": True, "ticker": ticker, "name": name, "price": price,
                 "direction": direction, "current": cur, "count": len(self.targets),
-                "message": f"{name} 목표가 {ps} {arrow} 도달 시 알림을 설정했습니다, 선생님.{cur_s}"}
+                "message": f"{name} 목표가 {ps} {arrow} 도달 시 알림을 설정했습니다, {USER_DISPLAY_NAME}.{cur_s}"}
 
     def cancel_target(self, ticker: str) -> int:
         rt = _resolve_ticker(ticker)
@@ -343,7 +344,7 @@ class PriceAlertWorker:
         reasons = [t[1] for t in triggers]
         labels = ", ".join(t[0] for t in triggers)
 
-        message = (f"선생님, {name} 종목이 과매도 구간에 진입하여 "
+        message = (f"{USER_DISPLAY_NAME}, {name} 종목이 과매도 구간에 진입하여 "
                    f"리스크 가이드라인 기준 진입 적기입니다. {labels} 신호입니다.")
 
         overlay_table = self._build_overlay_table(name, resolved, vals, triggers)
@@ -394,7 +395,7 @@ class PriceAlertWorker:
         arrow = "이상" if t["direction"] == "above" else "이하"
         ps = _fmt_price(ticker, price); tgt = _fmt_price(ticker, t["price"])
         labels = f"목표가 {arrow} 도달"
-        message = (f"선생님, {name} 종목이 목표가 {tgt} {arrow}에 도달했습니다. "
+        message = (f"{USER_DISPLAY_NAME}, {name} 종목이 목표가 {tgt} {arrow}에 도달했습니다. "
                    f"현재가는 {ps}입니다.")
         overlay_table = {
             "type": "table", "title": f"🎯 {name} 목표가 도달",
@@ -617,7 +618,7 @@ def execute_price_alert_tool(tool_name, arguments):
     if tool_name == "list_price_alerts":
         ts = _worker_instance.list_targets()
         if not ts:
-            return {"success": True, "count": 0, "message": "설정된 지정가 알림이 없습니다, 선생님."}
+            return {"success": True, "count": 0, "message": f"설정된 지정가 알림이 없습니다, {USER_DISPLAY_NAME}."}
         parts = [f"{t['name']} {_fmt_price(t['ticker'], t['price'])} "
                  f"{'이상' if t['direction'] == 'above' else '이하'}" for t in ts]
         return {"success": True, "count": len(ts),

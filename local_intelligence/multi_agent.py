@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 from typing import Any, Callable
 
+from speech_style import USER_DISPLAY_NAME
+
 _StageFn = Callable[[str, str], str]  # (stage_name, prompt) -> response
 _stage_fn: _StageFn | None = None
 
@@ -135,6 +137,25 @@ Chain-of-Thought:
 """
 
 
+# 병렬 모드용 — A 리포트에 의존하지 않는 '독립' 가치 분석 (교차검증은 오케스트레이터가 수행)
+_AGENT_B_PROMPT_SOLO = """[에이전트 B: 가치 투자자 자비스]
+
+역할: DCF·그레이엄·안전마진으로 펀더멘털을 독립적으로 평가.
+Chain-of-Thought:
+  1) 가치 관측: DCF/그레이엄/MoS 수치 bullet
+  2) 밸류 판단: 저평가/적정/고평가 근거
+  3) 가치 결론: 2~3문장 밸류 시각 요약
+
+규칙:
+- 컨텍스트에 없는 숫자 invent 금지
+- Gemini/클라우드 API 언급 금지
+- 한국어
+
+[가치·밸류에이션 데이터]
+{value_context}
+"""
+
+
 _ORCHESTRATOR_PROMPT = """[오케스트레이터: 종합 투자 매트릭스 자비스]
 
 역할: 에이전트 A(기술)와 B(가치) 관점을 통합해 입체적 최종 브리핑 작성.
@@ -144,9 +165,11 @@ Chain-of-Thought (내부적으로만, 출력에는 CoT 생략 가능):
   3) 최종 서술형 브리핑 4~5문장
 
 출력 규칙:
-- 반드시 '선생님,'으로 시작하는 하나의 연속 브리핑만 출력
+- 부드럽고 자연스러운 한국어 존댓말/해요체 (~예요/~해요/~네요/~죠). 반말 금지, 번역투·딱딱한 보고서체(~습니다 나열)도 금지.
+- 4~5문장. '__USER_NAME__' 호칭은 한 번만. '토니'·'선생님'·'태현' 금지.
 - 기술(매물대·이평)·가치(DCF·MoS)·심리(감성 MA)·What-If 리스크(MDD/VaR)를 모두 반영
 - 컨텍스트에 없는 숫자 invent 금지
+- 컨텍스트에 없는 '사실/이벤트'(실적·신제품·수주·라인증설 등) 지어내기 절대 금지 — 주어진 지표만 근거로
 - Gemini/클라우드 API 언급 금지
 - 한국어
 
@@ -172,33 +195,101 @@ def build_agent_b_prompt(ctx: dict[str, Any], agent_a_report: str) -> str:
     )
 
 
+def build_agent_b_prompt_solo(ctx: dict[str, Any]) -> str:
+    """A 리포트에 의존하지 않는 독립 가치분석 (병렬 실행용)."""
+    return _AGENT_B_PROMPT_SOLO.format(value_context=build_value_context(ctx))
+
+
 def build_orchestrator_prompt(
     ctx: dict[str, Any],
     compact_context: str,
     agent_a_report: str,
     agent_b_report: str,
 ) -> str:
-    return _ORCHESTRATOR_PROMPT.format(
+    return _ORCHESTRATOR_PROMPT.replace("__USER_NAME__", USER_DISPLAY_NAME).format(
         compact_context=compact_context.strip(),
         agent_a_report=agent_a_report.strip(),
         agent_b_report=agent_b_report.strip(),
     )
 
 
-def _default_http_ollama(prompt: str) -> str:
-    url = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
-    model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_K_M")
+def _ma_parallel() -> bool:
+    """토론 에이전트 A·B를 병렬 실행할지 (기본 ON). 정밀 분석 속도의 핵심."""
+    return os.getenv("JARVIS_MA_PARALLEL", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def _agent_model() -> str:
+    """A·B(토론) 스테이지용 '빠른' 모델. 미설치면 stock 모델로 안전 폴백.
+    숫자는 교차검증이 확정하므로 서술·판단은 경량 모델로 충분(정확도 손실 최소)."""
+    want = (os.getenv("OLLAMA_STOCK_AGENT_MODEL") or "qwen2.5:7b-instruct").strip()
+    try:
+        from ollama_agent import _model_installed, get_stock_model
+        if want and _model_installed(want):
+            return want
+        return get_stock_model()
+    except Exception:
+        return want
+
+
+def _orch_model() -> str:
+    """오케스트레이터(최종 종합) 스테이지용 정밀 모델(기본 stock 모델=Nemotron 30B)."""
+    try:
+        from ollama_agent import get_stock_model
+        return get_stock_model()
+    except Exception:
+        return os.getenv("OLLAMA_STOCK_MODEL", os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct"))
+
+
+def _stage_model(stage: str) -> str:
+    return _orch_model() if stage == "orchestrator" else _agent_model()
+
+
+def _stage_options(stage: str) -> dict | None:
+    """스테이지별 생성 길이 상한 — 전역 설정은 건드리지 않고 여기서만 짧게(=빠르게)."""
+    if stage == "orchestrator":
+        np = os.getenv("OLLAMA_ORCH_NUM_PREDICT", "768")
+    else:
+        np = os.getenv("OLLAMA_AGENT_NUM_PREDICT", "560")
+    np = np.strip()
+    return {"num_predict": int(np)} if np.isdigit() else None
+
+
+def _default_http_ollama(prompt: str, *, model: str | None = None,
+                         options: dict | None = None) -> str:
     timeout = float(os.getenv("LOCAL_INTEL_OLLAMA_STAGE_TIMEOUT",
-                               os.getenv("LOCAL_INTEL_OLLAMA_TIMEOUT", "20")))
+                               os.getenv("LOCAL_INTEL_OLLAMA_TIMEOUT", "45")))
+    try:
+        from ollama_agent import get_stock_model
+        from ollama_llm import ollama_chat
+        m = model or get_stock_model()
+        return ollama_chat(
+            m,
+            [{"role": "user", "content": prompt}],
+            timeout=timeout,
+            options=options,
+        )
+    except Exception:
+        pass
+    url = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
+    m = model
+    if not m:
+        try:
+            from ollama_agent import get_stock_model
+            m = get_stock_model()
+        except ImportError:
+            m = os.getenv("OLLAMA_STOCK_MODEL", os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct"))
     try:
         import requests
+        from ai_accuracy import ollama_accuracy_options
         r = requests.post(
             f"{url}/api/chat",
             json={
-                "model": model,
+                "model": m,
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": False,
-                "options": {"num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "4096"))},
+                "options": ollama_accuracy_options(options),
             },
             timeout=timeout,
         )
@@ -219,7 +310,8 @@ def _invoke_stage(stage: str, prompt: str, legacy_fn: Callable[[str], str] | Non
             return (legacy_fn(prompt) or "").strip()
         except Exception:
             return ""
-    return _default_http_ollama(prompt)
+    return _default_http_ollama(prompt, model=_stage_model(stage),
+                                options=_stage_options(stage))
 
 
 def multi_agent_enabled() -> bool:
@@ -243,24 +335,50 @@ def run_multi_agent_cot(
     if not compact_context and not ctx:
         return "", False, trace
 
-    prompt_a = build_agent_a_prompt(ctx)
-    agent_a = _invoke_stage("agent_a", prompt_a, legacy_ollama_fn)
-    trace["stages"]["agent_a"] = {"prompt_len": len(prompt_a), "output": agent_a[:500]}
-    if not agent_a:
-        return "", False, trace
+    # 실제(기본) 경로에서만 병렬 — 테스트 stage_fn / legacy_fn 경로는 순차 유지(결정성).
+    if _ma_parallel() and _stage_fn is None and legacy_ollama_fn is None:
+        prompt_a = build_agent_a_prompt(ctx)
+        prompt_b = build_agent_b_prompt_solo(ctx)   # A에 의존하지 않는 독립 가치분석
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            fa = ex.submit(_invoke_stage, "agent_a", prompt_a, legacy_ollama_fn)
+            fb = ex.submit(_invoke_stage, "agent_b", prompt_b, legacy_ollama_fn)
+            agent_a = fa.result()
+            agent_b = fb.result()
+        trace["parallel"] = True
+        trace["stages"]["agent_a"] = {"prompt_len": len(prompt_a), "output": agent_a[:500]}
+        trace["stages"]["agent_b"] = {"prompt_len": len(prompt_b), "output": agent_b[:500]}
+        if not agent_a and not agent_b:
+            return "", False, trace
+    else:
+        prompt_a = build_agent_a_prompt(ctx)
+        agent_a = _invoke_stage("agent_a", prompt_a, legacy_ollama_fn)
+        trace["stages"]["agent_a"] = {"prompt_len": len(prompt_a), "output": agent_a[:500]}
+        if not agent_a:
+            return "", False, trace
 
-    prompt_b = build_agent_b_prompt(ctx, agent_a)
-    agent_b = _invoke_stage("agent_b", prompt_b, legacy_ollama_fn)
-    trace["stages"]["agent_b"] = {"prompt_len": len(prompt_b), "output": agent_b[:500]}
-    if not agent_b:
-        return "", False, trace
+        prompt_b = build_agent_b_prompt(ctx, agent_a)
+        agent_b = _invoke_stage("agent_b", prompt_b, legacy_ollama_fn)
+        trace["stages"]["agent_b"] = {"prompt_len": len(prompt_b), "output": agent_b[:500]}
+        if not agent_b:
+            return "", False, trace
 
     prompt_o = build_orchestrator_prompt(ctx, compact_context, agent_a, agent_b)
     final = _invoke_stage("orchestrator", prompt_o, legacy_ollama_fn)
     trace["stages"]["orchestrator"] = {"prompt_len": len(prompt_o), "output": final[:800]}
     if not final:
+        try:
+            from ai_accuracy import merge_partial_agent_reports
+            merged = merge_partial_agent_reports(
+                agent_a, agent_b, name=str(ctx.get("name") or ctx.get("ticker") or ""),
+            )
+            if merged:
+                trace["partial_merge"] = True
+                return merged[:1500], True, trace
+        except ImportError:
+            pass
         return "", False, trace
 
     trace["agent_a_report"] = agent_a[:600]
     trace["agent_b_report"] = agent_b[:600]
-    return final[:1200], True, trace
+    return final[:1500], True, trace

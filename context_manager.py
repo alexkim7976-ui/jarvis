@@ -133,6 +133,11 @@ def append_exchange(
 ) -> None:
     history.append({"role": "user", "content": user_text})
     history.append({"role": "assistant", "content": assistant_text})
+    try:
+        from memory_store import save_exchange
+        save_exchange(user_text, assistant_text)
+    except ImportError:
+        pass
     maybe_summarize_and_trim(
         history,
         gemini_api_key=gemini_api_key,

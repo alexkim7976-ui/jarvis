@@ -1,0 +1,20 @@
+{
+  "classes": [
+    {
+      "course": "CSE 114",
+      "days": ["Mon", "Wed", "Fri"],
+      "start": "10:00",
+      "end": "10:53",
+      "location": "Engineering 143",
+      "building": "Engineering"
+    },
+    {
+      "course": "AMS 151",
+      "days": ["Tue", "Thu"],
+      "start": "14:30",
+      "end": "15:50",
+      "location": "Harriman 116",
+      "building": "Harriman Hall"
+    }
+  ]
+}

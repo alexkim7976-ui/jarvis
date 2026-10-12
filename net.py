@@ -77,14 +77,33 @@ SESSION = _build_session()
 def request(method: str, url: str, **kwargs):
     """공용 세션 요청 — timeout 미지정 시 프로파일 기본값 주입."""
     kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
+    _guard_egress(url)
     return SESSION.request(method, url, **kwargs)
 
 
 def get(url: str, **kwargs):
     kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
+    _guard_egress(url)
     return SESSION.get(url, **kwargs)
 
 
 def post(url: str, **kwargs):
     kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
+    _guard_egress(url)
     return SESSION.post(url, **kwargs)
+
+
+def _guard_egress(url: str) -> None:
+    """최대/엄격 보안 모드에서 모든 외부 HTTP 요청에 SSRF 검증 적용."""
+    try:
+        from security_policy import net_egress_guard_enabled
+        if not net_egress_guard_enabled():
+            return
+        from security import validate_url
+        safe, reason = validate_url(url)
+        if not safe:
+            raise PermissionError(f"네트워크 이그레스 차단: {reason} ({url[:80]})")
+    except PermissionError:
+        raise
+    except Exception:
+        pass

@@ -7,6 +7,7 @@ JARVIS Link 검증 — 웹소켓 HUD 스트림 / 원격 리밸런싱 승인 / �
 """
 from __future__ import annotations
 
+from speech_style import USER_DISPLAY_NAME
 import json
 import tempfile
 from pathlib import Path
@@ -152,7 +153,7 @@ def test_push_alert_channels_mocked():
     jarvis_link.TELEGRAM_BOT_TOKEN = "BOT"; jarvis_link.TELEGRAM_CHAT_ID = "CHAT"
     sent = {}
     link._post_telegram = lambda text: sent.update(text=text) or True
-    res = link.push_alert("토니, 외부 활동 중 공급망 리스크가 감지되었습니다.",
+    res = link.push_alert(f"{USER_DISPLAY_NAME}, 외부 활동 중 공급망 리스크가 감지되었습니다.",
                           context={"rebalance": True, "haircut_pct": 10},
                           issue_code=True, blocking=True)
     assert "telegram" in res["channels"], res

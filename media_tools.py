@@ -5,6 +5,7 @@ media_pipeline 런타임을 LLM 도구로 노출하고, 전처리 산출물을 S
 """
 from __future__ import annotations
 
+from speech_style import USER_DISPLAY_NAME
 import json
 from collections import deque
 from typing import TYPE_CHECKING
@@ -143,7 +144,7 @@ def execute_media_tool(tool_name: str, arguments) -> dict:
 
         job = rt.submit_url(url, title=title)
         msg = (
-            f"선생님, 백그라운드에서 스트리밍 캡처 및 전처리를 시작했습니다. "
+            f"{USER_DISPLAY_NAME}, 백그라운드에서 스트리밍 캡처 및 전처리를 시작했습니다. "
             f"(작업 ID: {job.job_id})"
         )
         return {

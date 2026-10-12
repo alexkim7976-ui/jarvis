@@ -15,8 +15,9 @@ yfinance 실시간 현재가 + 원달러 환율로 총자산/수익률을 집계
 
 의존성: pip install yfinance
 """
-
 from __future__ import annotations
+
+from speech_style import USER_DISPLAY_NAME
 
 import os
 import json
@@ -444,7 +445,7 @@ class PortfolioManager:
         ret = report["stock_return_pct"]
         cash = report["cash_krw"]
         n = len(report["positions"])
-        msg = (f"선생님의 현재 총자산은 {total:,.0f}원이며, "
+        msg = (f"{USER_DISPLAY_NAME}의 현재 총자산은 {total:,.0f}원이며, "
                f"주식 평가 수익률은 {ret:+.2f}%를 기록 중입니다.")
         if n > 0:
             best = max(report["positions"], key=lambda x: x["return_pct"])
@@ -551,7 +552,7 @@ def execute_portfolio_tool(tool_name, arguments):
         res = _pf_instance.record_trade(ticker, shares, price, currency)
         if res.get("success"):
             verb = "매수" if shares > 0 else "매도"
-            res["message"] = f"{ticker} {abs(shares):g}주 {verb} 기록 완료, 선생님."
+            res["message"] = f"{ticker} {abs(shares):g}주 {verb} 기록 완료, {USER_DISPLAY_NAME}."
         return res
 
     if tool_name == "deposit_portfolio_cash":

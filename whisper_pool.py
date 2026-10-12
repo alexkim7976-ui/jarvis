@@ -28,7 +28,20 @@ import threading
 
 from resource_profile import is_apple_silicon
 
+# HuggingFace MLX 리포 — `-mlx-q4` 는 small/medium 등에만 존재. large-v3 는 `-mlx` 접미사.
+_MLX_HF_REPOS: dict[str, str] = {
+    "tiny": "mlx-community/whisper-tiny-mlx",
+    "base": "mlx-community/whisper-base-mlx",
+    "small": "mlx-community/whisper-small-mlx-q4",
+    "medium": "mlx-community/whisper-medium-mlx-q4",
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "large": "mlx-community/whisper-large-v3-mlx",
+    "large-v2": "mlx-community/whisper-large-v2-mlx",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+    "turbo": "mlx-community/whisper-large-v3-turbo",
+}
 _models: dict[tuple, object] = {}
+_failed_mlx_keys: set[tuple[str, str]] = set()
 _lock = threading.Lock()
 
 
@@ -73,8 +86,13 @@ class _MLXWhisperAdapter:
         self._repo = repo
 
     def transcribe(self, audio, language=None, **_ignored):
-        # faster-whisper 전용 인자(beam_size 등)는 무시한다.
-        res = self._mlx.transcribe(audio, path_or_hf_repo=self._repo, language=language)
+        try:
+            res = self._mlx.transcribe(audio, path_or_hf_repo=self._repo, language=language)
+        except Exception as e:
+            err = str(e).lower()
+            if any(x in err for x in ("repository not found", "401", "404", "invalid username")):
+                invalidate_mlx_repo(self._repo)
+            raise
         raw = res.get("segments") or []
         segs = [_Seg(s.get("text", "")) for s in raw]
         if not segs:
@@ -82,14 +100,27 @@ class _MLXWhisperAdapter:
         return segs, res
 
 
+def invalidate_mlx_repo(repo: str) -> None:
+    """HF MLX 리포 로드 실패 시 캐시 제거 → faster-whisper 재시도."""
+    key = ("mlx", repo)
+    _failed_mlx_keys.add(key)
+    with _lock:
+        _models.pop(key, None)
+
+
 def _mlx_repo(size: str) -> str:
     override = os.getenv("JARVIS_WHISPER_MLX_REPO", "").strip()
     if override:
         return override
-    # Apple Silicon: 4-bit 양자화 리포가 RAM·대역폭 모두 유리 (tiny는 full도 충분히 가벼움)
-    if is_apple_silicon() and size not in ("tiny", "base"):
-        return f"mlx-community/whisper-{size}-mlx-q4"
-    return f"mlx-community/whisper-{size}-mlx"
+    normalized = size.strip().lower().replace("_", "-")
+    if normalized in _MLX_HF_REPOS:
+        return _MLX_HF_REPOS[normalized]
+    # 알 수 없는 크기 — large-v3 계열은 q4 접미사 없이 시도
+    if "large" in normalized or "v3" in normalized or "turbo" in normalized:
+        return f"mlx-community/whisper-{normalized}-mlx"
+    if is_apple_silicon() and normalized not in ("tiny", "base"):
+        return f"mlx-community/whisper-{normalized}-mlx-q4"
+    return f"mlx-community/whisper-{normalized}-mlx"
 
 
 def get_whisper_model(size: str | None = None, *, role: str = "main"):
@@ -100,17 +131,18 @@ def get_whisper_model(size: str | None = None, *, role: str = "main"):
     if backend == "mlx":
         repo = _mlx_repo(size)
         key = ("mlx", repo)
-        with _lock:
-            model = _models.get(key)
-            if model is not None:
-                return model
-            try:
-                model = _MLXWhisperAdapter(repo)
-                _models[key] = model
-                return model
-            except Exception:
-                # mlx-whisper 미설치/로드 실패 → faster-whisper로 안전 폴백
-                backend = "faster"
+        if key not in _failed_mlx_keys:
+            with _lock:
+                model = _models.get(key)
+                if model is not None:
+                    return model
+                try:
+                    model = _MLXWhisperAdapter(repo)
+                    _models[key] = model
+                    return model
+                except Exception:
+                    invalidate_mlx_repo(repo)
+        backend = "faster"
 
     compute = os.getenv("JARVIS_WHISPER_COMPUTE", "int8")
     device = os.getenv("JARVIS_WHISPER_DEVICE", "cpu")

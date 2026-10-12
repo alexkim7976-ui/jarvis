@@ -21,8 +21,9 @@ NOISE(찌라시/시황반복) vs CRITICAL(공시/실적/M&A/소송 등) 분류 �
 의존성:
   pip install yfinance google-generativeai
 """
-
 from __future__ import annotations
+
+from speech_style import USER_DISPLAY_NAME
 
 import os
 import re
@@ -44,6 +45,14 @@ try:
     import net  # 느린 WiFi: 연결 재사용·재시도·적응형 타임아웃
 except Exception:
     net = requests
+
+try:
+    from free_mode import free_only_enabled, use_paid_search
+except ImportError:
+    def free_only_enabled():  # type: ignore
+        return False
+    def use_paid_search():  # type: ignore
+        return bool(os.getenv("TAVILY_API_KEY", ""))
 
 
 # ──────────────────────────────────────────────
@@ -235,8 +244,8 @@ def fetch_and_filter_news(ticker: str, limit: int = NEWS_MAX_PER_TICKER,
     """
     collected = fetch_news_yfinance(ticker, limit)
 
-    # yfinance 결과가 부족하면 Tavily 로 보강
-    if use_tavily and len(collected) < max(3, limit // 2):
+    # yfinance 결과가 부족하면 Tavily 로 보강 (무료 모드에서는 yfinance만)
+    if use_tavily and use_paid_search() and len(collected) < max(3, limit // 2):
         collected += fetch_news_tavily(ticker, limit)
 
     # ── 중복/유사 기사 1차 필터 ──
@@ -301,6 +310,114 @@ def _strip_json_fence(text: str) -> str:
     return t.strip()
 
 
+def analyze_news_local(news_items: list[dict], ticker: str = "") -> list[dict]:
+    """Gemini 없이 로컬 키워드 기반 NOISE/CRITICAL 분류 + 감성 점수."""
+    if not news_items:
+        return []
+
+    _POS = (
+        "호재", "상승", "급등", "실적", "흑자", "수주", "승인", "돌파", "신고가",
+        "buy", "beat", "surge", "profit", "upgrade", "record",
+    )
+    _NEG = (
+        "악재", "하락", "급락", "적자", "소송", "리콜", "감산", "적자", "하향",
+        "sell", "miss", "plunge", "loss", "downgrade", "investigation",
+    )
+    _CRIT = (
+        "공시", "실적", "m&a", "인수", "합병", "fda", "소송", "상장", "ipo",
+        "earnings", "merger", "acquisition", "sec", "guidance",
+    )
+
+    results = []
+    for n in news_items:
+        blob = f"{n.get('title', '')} {(n.get('summary') or '')}".lower()
+        is_crit = any(k in blob for k in _CRIT)
+        pos = sum(1 for k in _POS if k in blob)
+        neg = sum(1 for k in _NEG if k in blob)
+        if not is_crit and pos == 0 and neg == 0:
+            results.append({
+                "title": str(n.get("title", ""))[:200],
+                "type": "NOISE",
+                "score": 0,
+                "reason": "로컬 분류: 일반 시황/잡음",
+            })
+            continue
+        score = max(-10, min(10, (pos - neg) * 2))
+        if score == 0:
+            score = 3 if pos >= neg else -3
+        ntype = "CRITICAL" if is_crit or abs(score) >= 3 else "NOISE"
+        if ntype == "NOISE":
+            score = 0
+        results.append({
+            "title": str(n.get("title", ""))[:200],
+            "type": ntype,
+            "score": score,
+            "reason": f"로컬 키워드 감성 (Gemini 0, score={score:+d})",
+        })
+    return results
+
+
+def analyze_news_with_ollama(news_items: list[dict], ticker: str = "") -> list[dict]:
+    """Ollama(qwen) JSON 뉴스 분류 — Gemini와 동일 스키마, 무료."""
+    if not news_items:
+        return []
+    try:
+        from ollama_agent import get_stock_model
+        from ollama_llm import ollama_chat
+    except ImportError:
+        return analyze_news_local(news_items, ticker)
+
+    payload = []
+    for i, n in enumerate(news_items):
+        payload.append({
+            "index": i,
+            "title": n["title"],
+            "summary": (n.get("summary") or "")[:300],
+            "publisher": n.get("publisher", ""),
+        })
+    name = _display_name(ticker) if ticker else ""
+    prompt = (
+        f"{_NEWS_SYSTEM_INSTRUCTION}\n\n"
+        f"분석 대상 종목: {name} ({ticker})\n"
+        f"뉴스 목록:\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
+    )
+    try:
+        raw = ollama_chat(
+            get_stock_model(),
+            [{"role": "user", "content": prompt}],
+            timeout=float(os.getenv("NEWS_OLLAMA_TIMEOUT", "60")),
+        )
+        parsed = json.loads(_strip_json_fence(raw))
+    except Exception as e:
+        _log(f"Ollama 뉴스 분석 실패 → 키워드 폴백: {e}")
+        return analyze_news_local(news_items, ticker)
+
+    if not isinstance(parsed, list):
+        return analyze_news_local(news_items, ticker)
+
+    results = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        ntype = str(item.get("type", "NOISE")).upper()
+        if ntype not in ("NOISE", "CRITICAL"):
+            ntype = "NOISE"
+        try:
+            score = int(item.get("score", 0))
+        except (TypeError, ValueError):
+            score = 0
+        score = max(-10, min(10, score))
+        if ntype == "NOISE":
+            score = 0
+        results.append({
+            "title": str(item.get("title", ""))[:200],
+            "type": ntype,
+            "score": score,
+            "reason": str(item.get("reason", ""))[:200],
+        })
+    return results if results else analyze_news_local(news_items, ticker)
+
+
 def analyze_news_with_gemini(news_items: list[dict], ticker: str = "") -> list[dict]:
     """
     전처리된 뉴스 리스트를 Gemini(gemini-1.5-flash)에 전달하여
@@ -311,9 +428,12 @@ def analyze_news_with_gemini(news_items: list[dict], ticker: str = "") -> list[d
     """
     if not news_items:
         return []
+    if free_only_enabled() or not GEMINI_API_KEY or GEMINI_API_KEY == "STORED_IN_KEYCHAIN":
+        _log("무료/로컬 모드 — Ollama 뉴스 분석 (qwen)")
+        return analyze_news_with_ollama(news_items, ticker)
     if not GEMINI_API_KEY:
-        _log("GEMINI_API_KEY 없음 — 스코어링 불가")
-        return []
+        _log("GEMINI_API_KEY 없음 — 로컬 감성 폴백")
+        return analyze_news_local(news_items, ticker)
 
     try:
         import google.generativeai as genai
@@ -418,7 +538,7 @@ def _briefing_text(ticker: str, item: dict) -> str:
         tone = "초강력 악재"
     else:
         tone = "호재" if score > 0 else "악재"
-    return (f"선생님, 긴급 속보입니다. {name} 관련 {tone} 뉴스가 포착되었습니다. "
+    return (f"{USER_DISPLAY_NAME}, 긴급 속보입니다. {name} 관련 {tone} 뉴스가 포착되었습니다. "
             f"{item['reason']} 예상 영향 점수는 {score:+d}점입니다.")
 
 
@@ -485,7 +605,15 @@ class NewsAnalyzer:
         self.watchlist = watchlist if watchlist is not None else list(NEWS_WATCHLIST)
         self.interval = interval
         self.urgent_threshold = urgent_threshold
-        self.enabled = bool(self.watchlist) and bool(GEMINI_API_KEY)
+        try:
+            from free_mode import free_only_enabled
+            _free = free_only_enabled()
+        except ImportError:
+            _free = False
+        self.enabled = bool(self.watchlist) and (
+            bool(GEMINI_API_KEY) and GEMINI_API_KEY != "STORED_IN_KEYCHAIN"
+            or _free
+        )
 
         self._event_q = deque(maxlen=50)
         self._lock = threading.Lock()
@@ -498,7 +626,7 @@ class NewsAnalyzer:
     # ── 라이프사이클 ──
     def start(self):
         if not self.enabled:
-            _log("뉴스 감시 비활성: NEWS_WATCHLIST 와 GEMINI_API_KEY 설정 필요")
+            _log("뉴스 감시 비활성: NEWS_WATCHLIST 설정 필요 (무료 모드: Ollama 분석)")
             return
         self._running = True
         self._thread = threading.Thread(target=self._daemon_loop, daemon=True)
@@ -579,7 +707,7 @@ class NewsAnalyzer:
             "critical_items": fresh,
             "overlay_table": overlay_table,
             "message": _briefing_text(ticker, top) if urgent else (
-                f"선생님, {name} 관련 주목할 뉴스가 있습니다. "
+                f"{USER_DISPLAY_NAME}, {name} 관련 주목할 뉴스가 있습니다. "
                 f"{top['reason']} 예상 영향은 {top['score']:+d}점입니다."
             ),
             "timestamp": datetime.now().isoformat(),
@@ -650,7 +778,7 @@ class NewsAnalyzer:
                 "reason": top["reason"],
                 "critical_items": fresh,
                 "overlay_table": overlay_table,
-                "message": (f"선생님, {result['name']} 관련 주목할 뉴스가 있습니다. "
+                "message": (f"{USER_DISPLAY_NAME}, {result['name']} 관련 주목할 뉴스가 있습니다. "
                             f"{top['reason']} 예상 영향은 {top['score']:+d}점입니다."),
                 "timestamp": datetime.now().isoformat(),
             }

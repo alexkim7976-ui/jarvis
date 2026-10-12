@@ -105,8 +105,9 @@ def test_deterministic_seed_reproducibility():
 
 
 def test_cache_stress_profile_gemini_zero():
-    from hybrid_router import try_local_tool_execution
+    from local_intelligence.engine import refresh_local_analysis_report, format_tool_response
     from local_intelligence.report_cache import set_report_path_for_tests, read_store, clear_reports
+    from local_intelligence.multi_agent import set_ollama_stage_fn
 
     mock_stress = {
         "engine": "whatif_monte_carlo",
@@ -162,13 +163,21 @@ def test_cache_stress_profile_gemini_zero():
         "anomaly_flag": False,
     }
 
+    _saved = {k: os.environ.get(k) for k in ("LOCAL_INTEL_OLLAMA_ENABLED", "LOCAL_INTEL_MULTI_AGENT")}
+    os.environ["LOCAL_INTEL_OLLAMA_ENABLED"] = "1"
+    os.environ["LOCAL_INTEL_MULTI_AGENT"] = "1"
+    set_ollama_stage_fn(lambda s, p: {
+        "agent_a": "기술 요약", "agent_b": "가치 요약",
+        "orchestrator": "스트레스 시나리오 낙폭이 커서 위기 대비가 필요해.",
+    }.get(s, ""))
+
     with tempfile.TemporaryDirectory() as td:
         rp = Path(td) / "local_analysis_report.json"
         set_report_path_for_tests(rp)
         try:
             with patch("local_intelligence.engine.gather_fusion_context", return_value=mock_ctx):
-                result = try_local_tool_execution(
-                    "analyze_stock_multi_source", {"query": "AAPL"},
+                result = format_tool_response(
+                    refresh_local_analysis_report("AAPL", force_ollama=True)
                 )
             assert result.get("gemini_called") is False
             report = result.get("report") or {}
@@ -183,6 +192,12 @@ def test_cache_stress_profile_gemini_zero():
         finally:
             clear_reports()
             set_report_path_for_tests(None)
+            set_ollama_stage_fn(None)
+            for _k, _v in _saved.items():
+                if _v is None:
+                    os.environ.pop(_k, None)
+                else:
+                    os.environ[_k] = _v
     print("✓ cache stress_test_profile + gemini 0")
 
 

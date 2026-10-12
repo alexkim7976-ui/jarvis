@@ -46,6 +46,8 @@ BLOCKED_PATHS = [
     HOME / ".aws",
     HOME / ".config" / "gcloud",
     HOME / "Library" / "Keychains",
+    HOME / "Library" / "Application Support" / "Keychain",
+    HOME / ".openclaw",
     Path("/etc/shadow"),
     Path("/etc/passwd"),
     Path("/private/etc"),
@@ -53,9 +55,18 @@ BLOCKED_PATHS = [
     _PROJECT_ROOT / ".env",
     _PROJECT_ROOT / ".credentials",
     _PROJECT_ROOT / ".logs",
+    _PROJECT_ROOT / ".certs",
+    _PROJECT_ROOT / ".jarvis_link_token",
+    _PROJECT_ROOT / "auth_idp",
+    _PROJECT_ROOT / "device_trust",
     _PROJECT_ROOT / "token.json",
     _PROJECT_ROOT / "credentials.json",
     _PROJECT_ROOT / "portfolio.json",
+    _PROJECT_ROOT / "campus_token.json",
+    _PROJECT_ROOT / ".cursor",
+    _PROJECT_ROOT / "agent-transcripts",
+    _PROJECT_ROOT / "local_analysis_report.json",
+    _PROJECT_ROOT / "market_snapshot.json",
 ]
 
 # ── 위험 명령 / 인자 패턴 ──
@@ -111,6 +122,18 @@ def validate_path(path_str: str, must_exist: bool = False) -> tuple[bool, str, P
     if not allowed:
         _audit_logger.warning(f"PATH_OUTSIDE path={path_str!r} resolved={real}")
         return False, "허용 범위 밖의 경로", None
+
+    # 최대 보안: 파일 경로는 샌드박스 가상 루트 내만 허용
+    try:
+        from security_policy import paths_sandbox_only
+        if paths_sandbox_only():
+            import sandbox as _sbx
+            if not _sbx.is_within_sandbox(real):
+                _audit_logger.warning(
+                    f"PATH_SANDBOX_ONLY path={path_str!r} resolved={real}")
+                return False, "최대 보안 모드 — 샌드박스 외부 경로 차단", None
+    except Exception:
+        pass
 
     if must_exist and not real.exists():
         return False, f"존재하지 않는 경로: {p}", None
@@ -202,15 +225,30 @@ class RateLimiter:
         return True
 
 
-# 도구 호출 글로벌 속도 제한 (분당 30회)
-tool_rate_limiter = RateLimiter(max_calls=30, window_sec=60)
+# 도구 호출 글로벌 속도 제한 (정책에 따라 reconfigure_from_policy() 로 조정)
+def _policy_rate(name: str, default: int) -> int:
+    try:
+        from security_policy import policy_int
+        return policy_int(name, default)
+    except Exception:
+        return default
+
+
+tool_rate_limiter = RateLimiter(
+    max_calls=_policy_rate("tool_rate_max", 30), window_sec=60)
 
 
 # ── 환경 보안 검증 ──
-def check_env_security() -> list[str]:
-    """부팅 시 보안 상태 점검 — 경고 목록 반환."""
+def check_env_security(*, auto_fix: bool = True) -> list[str]:
+    """부팅 시 보안 상태 점검 — 경고 목록 반환. auto_fix 시 권한 자동 하드닝."""
     warnings = []
     project = Path(__file__).parent
+
+    if auto_fix:
+        try:
+            harden_sensitive_files()
+        except Exception:
+            pass
 
     # .gitignore 존재 확인
     if not (project / ".gitignore").exists():
@@ -241,7 +279,7 @@ def check_env_security() -> list[str]:
         try:
             r = subprocess.run(
                 ["git", "ls-files", "--cached", ".env", "credentials.json",
-                 "token.json", ".credentials/"],
+                 "token.json", ".credentials/", ".jarvis_link_token"],
                 capture_output=True, text=True, cwd=str(project), timeout=5)
             tracked = r.stdout.strip()
             if tracked:
@@ -249,10 +287,37 @@ def check_env_security() -> list[str]:
         except Exception:
             pass
 
+    # 최대 보안: Keychain 미마이그레이션 경고
+    try:
+        from security_policy import keychain_only_mode, is_strict_or_above
+        if keychain_only_mode():
+            try:
+                from secure_config import get_security_status
+                st = get_security_status()
+                plain = [k for k, v in st["keys"].items() if "평문" in v]
+                if plain:
+                    warnings.append(
+                        f"Keychain 전용 모드 — .env 평문 키: {', '.join(plain[:5])} "
+                        f"→ python3 secure_config.py --migrate")
+            except Exception:
+                pass
+        if is_strict_or_above():
+            if not os.getenv("JARVIS_SECURITY_LEVEL"):
+                pass  # already set via policy
+    except ImportError:
+        pass
+
     return warnings
 
 
-# ── API 키 마스킹 (로그 출력용) ──
+def is_boot_blocking_security_warning(message: str) -> bool:
+    """앱/부팅을 막아야 하는 치명적 보안 경고 (권한 644 등은 자동 수정 후 통과)."""
+    critical = (
+        "Keychain 전용 모드 — .env 평문",
+        "Git이 민감 파일을 추적",
+        ".gitignore 없음",
+    )
+    return any(c in message for c in critical)
 def mask_key(key: str, visible: int = 4) -> str:
     """API 키를 마스킹 (앞 4자만 표시)."""
     if not key or len(key) <= visible:
@@ -293,6 +358,14 @@ _INJECTION_PATTERNS = [
     r"(모든|전체)\s*(파일|데이터|폴더).{0,10}(삭제|지워|제거)",
     r"(보안|안전|제한|가드레일|필터)\s*(을|를)?\s*(해제|무시|우회|꺼)",
     r"개발자\s*모드|탈옥|제한\s*없이",
+    r"(\.env|dotenv|keychain|openclaw\.json).{0,20}(읽|열|출력|전송|복사)",
+    r"(sudo|chmod\s+777|chown\s+root|/etc/passwd)",
+    r"(clawhub|skills\.install|plugin.*install)",
+    # 인코딩/우회 시도
+    r"base64\s*decode",
+    r"\\u[0-9a-f]{4}",
+    r"<\s*script\b",
+    r"(\[\[|\{\{)\s*(system|exec|eval)\b",
 ]
 _INJECTION_RE = re.compile("|".join(_INJECTION_PATTERNS), re.IGNORECASE)
 
@@ -600,6 +673,46 @@ def _resolve_host_ips(host: str, port: int | None):
     return out
 
 
+def _local_service_urls() -> list[tuple[str, int | None]]:
+    """허용할 로컬 서비스 (env URL → host, port). Ollama·SupplyChain 등."""
+    if os.getenv("JARVIS_LOCAL_SERVICE_EGRESS", "1").strip().lower() in (
+        "0", "false", "no", "off",
+    ):
+        return []
+    out: list[tuple[str, int | None]] = []
+    for key in ("OLLAMA_URL", "SUPPLY_CHAIN_URL", "OPENCLAW_GATEWAY_URL"):
+        raw = os.getenv(key, "").strip()
+        if not raw:
+            continue
+        try:
+            p = urlparse(raw)
+            host = (p.hostname or "").lower().rstrip(".")
+            if host:
+                out.append((host, p.port))
+        except Exception:
+            continue
+    return out
+
+
+def _is_allowed_local_service(url: str) -> bool:
+    """Mac 로컬 AI(Ollama)·로컬 백엔드 — 루프백 이그레스 허용."""
+    try:
+        p = urlparse(url.strip())
+        host = (p.hostname or "").lower().rstrip(".")
+        port = p.port
+    except Exception:
+        return False
+    if not host:
+        return False
+    lip = _coerce_ip(host)
+    if host != "localhost" and not (lip and lip.is_loopback):
+        return False
+    for svc_host, svc_port in _local_service_urls():
+        if host == svc_host and (port == svc_port or (port is None and svc_port is None)):
+            return True
+    return False
+
+
 def validate_url(url: str) -> tuple[bool, str]:
     """
     외부 호출용 URL을 검증 — SSRF/이그레스 차단.
@@ -617,6 +730,9 @@ def validate_url(url: str) -> tuple[bool, str]:
     if scheme not in _ALLOWED_URL_SCHEMES:
         _audit_logger.warning(f"URL_SCHEME_BLOCKED url={url[:80]!r} scheme={scheme}")
         return False, f"허용되지 않은 스킴: {scheme or '(없음)'}"
+
+    if _is_allowed_local_service(url):
+        return True, "OK_LOCAL_SERVICE"
 
     # 후행 점(FQDN 절대표기) 정규화 — 'localhost.'/'169.254.169.254.' 같은
     # 변형으로 리터럴 차단·IP 강제 검사를 우회하는 SSRF를 막는다(RFC 1035).
@@ -669,8 +785,21 @@ DESTRUCTIVE_TOOLS = {
     "remove_face",
 }
 
-# 파괴적 작업 전용 속도 제한 (분당 8회) — 폭주성 파일 이동/삭제 방지
-destructive_rate_limiter = RateLimiter(max_calls=8, window_sec=60)
+# 파괴적 작업 전용 속도 제한 — 폭주성 파일 이동/삭제 방지
+destructive_rate_limiter = RateLimiter(
+    max_calls=_policy_rate("destructive_rate_max", 8), window_sec=60)
+
+
+def reconfigure_from_policy() -> None:
+    """security_policy.apply_environment_hardening() 이후 속도 제한·차단 목록 재적용."""
+    global tool_rate_limiter, destructive_rate_limiter
+    tool_rate_limiter = RateLimiter(
+        max_calls=_policy_rate("tool_rate_max", 30), window_sec=60)
+    destructive_rate_limiter = RateLimiter(
+        max_calls=_policy_rate("destructive_rate_max", 8), window_sec=60)
+    _audit_logger.info(
+        f"POLICY_RECONFIGURE tool_rate={tool_rate_limiter.max_calls}/min "
+        f"destructive_rate={destructive_rate_limiter.max_calls}/min")
 
 
 def guard_destructive_tool(tool_name: str, args: dict) -> tuple[bool, str]:
@@ -1007,12 +1136,22 @@ def reinitialize_audit_log(reason: str = "manual") -> str | None:
 # ── 민감 파일 권한 하드닝 (at-rest) ──
 # 금융/개인 상태 파일이 그룹/타인 읽기 가능하면 0600으로 강제한다.
 _SENSITIVE_FILES = [
+    ".env",
     "portfolio.json",
     "social_baseline.json",
     "stock_monitor_rules.json",
     "campus_token.json",
+    ".credentials/campus_seen.json",
+    "campus_seen.json",
+    "voice_profile/device.json",
+    "voice_profile/profile.npz",
     "token.json",
     "credentials.json",
+    ".jarvis_link_token",
+    ".jarvis.pid",
+    ".jarvis.wake",
+    "local_analysis_report.json",
+    "market_snapshot.json",
 ]
 
 
@@ -1031,6 +1170,94 @@ def harden_sensitive_files() -> list[str]:
             except OSError:
                 pass
     return fixed
+
+
+# ════════════════════════════════════════════════════════════════════
+#  레이어 10: FDS 동적 신뢰 — 고위험 도구 게이트
+# ════════════════════════════════════════════════════════════════════
+_FDS_ENGINE = None
+
+
+def set_fds_engine(engine) -> None:
+    """Alert Pipeline / 독립 FDS 엔진을 도구 실행 게이트에 연결."""
+    global _FDS_ENGINE
+    _FDS_ENGINE = engine
+    _audit_logger.info(f"FDS_ENGINE {'연결됨' if engine else '해제됨'}")
+
+
+def _extract_fds_amount(tool_name: str, args: dict) -> float:
+    if not isinstance(args, dict):
+        return 0.0
+    for k in ("amount_krw", "cash_krw", "cash", "amount", "price", "shares", "quantity", "qty"):
+        if k in args:
+            try:
+                return abs(float(args[k]))
+            except (TypeError, ValueError):
+                continue
+    if tool_name == "record_stock_trade":
+        try:
+            s = float(args.get("shares", 0) or 0)
+            p = float(args.get("price", 0) or args.get("avg_price", 0) or 0)
+            return abs(s * p)
+        except (TypeError, ValueError):
+            pass
+    return 0.0
+
+
+def guard_fds_tool(tool_name: str, args: dict) -> tuple[bool, str]:
+    """FDS 행동 이상 탐지 — 고위험 도구 호출 직전 평가.
+    strict/maximum 모드에서 FDS 미가동 시 고위험 도구는 차단(fail-closed)."""
+    try:
+        from security_policy import (
+            fds_tools_enabled, is_maximum_security, FDS_MONITORED_TOOLS,
+        )
+    except ImportError:
+        return True, "OK"
+
+    if not fds_tools_enabled():
+        return True, "OK"
+    if tool_name not in FDS_MONITORED_TOOLS:
+        return True, "OK"
+
+    if _FDS_ENGINE is None:
+        if is_maximum_security():
+            chain_event("FDS_BLOCK", {"tool": tool_name, "reason": "engine_unavailable"})
+            return False, "최대 보안 모드 — FDS 미가동, 고위험 도구 차단"
+        return True, "OK"
+
+    try:
+        from fds import BehaviorEvent
+    except ImportError:
+        return True, "OK"
+
+    amount = _extract_fds_amount(tool_name, args or {})
+    ev = BehaviorEvent(sub="local_user", command=tool_name, amount=amount)
+    decision = _FDS_ENGINE.evaluate(ev)
+
+    if decision.action == "block":
+        _audit_logger.warning(
+            f"FDS_BLOCK tool={tool_name} score={decision.risk_score} "
+            f"reasons={decision.reasons[:3]}")
+        chain_event("FDS_BLOCK", {
+            "tool": tool_name, "score": decision.risk_score,
+            "reasons": decision.reasons[:5],
+        })
+        return False, f"행동 이상 탐지 차단 (위험점수 {decision.risk_score})"
+
+    if decision.action == "step_up":
+        _audit_logger.warning(
+            f"FDS_STEP_UP tool={tool_name} score={decision.risk_score}")
+        chain_event("FDS_STEP_UP", {
+            "tool": tool_name, "score": decision.risk_score,
+            "reasons": decision.reasons[:5],
+        })
+        if is_maximum_security():
+            return False, (
+                f"추가 확인 필요 (위험점수 {decision.risk_score}) — "
+                "최대 보안 모드에서는 자동 실행 불가")
+        return True, "OK"
+
+    return True, "OK"
 
 
 # ── CLI: 감사 체인 검증 ──

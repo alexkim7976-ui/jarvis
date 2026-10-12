@@ -22,7 +22,41 @@ import shutil
 import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
-from collections import defaultdict
+from collections import defaultdict, deque
+
+# LLM 컨텍스트 — 최근 열린 파일/앱 (지시대명사 "그 문서", "아까 본 파일" 해석용)
+_RECENT_FILES: deque = deque(maxlen=8)
+
+
+def register_recent_file(path: str, name: str = "", action: str = "opened") -> None:
+    p = (path or "").strip()
+    if not p:
+        return
+    label = (name or Path(p).name or p).strip()
+    _RECENT_FILES.append({
+        "path": p,
+        "name": label,
+        "action": action,
+        "at": datetime.now().strftime("%H:%M"),
+    })
+
+
+def get_file_context_suffix() -> str:
+    """최근 파일/앱 — LLM System Prompt 주입용."""
+    if not _RECENT_FILES:
+        return ""
+    lines = ["\n\n[RECENT FILES — recently opened by user or JARVIS tools]"]
+    for i, item in enumerate(reversed(list(_RECENT_FILES)), 1):
+        lines.append(
+            f"- #{i} {item.get('name')} ({item.get('action')}) "
+            f"path={item.get('path')} @ {item.get('at')}"
+        )
+    lines.append(
+        "사용자가 '그 문서', '아까 본 파일', '방금 연 파일', '아까 보던 그거' 등을 말하면 "
+        "가장 최근(#1) path로 open_file을 호출하라. 여러 단계 요청(열고+볼륨 조절 등)은 "
+        "필요한 도구를 순서대로 여러 번 호출하라."
+    )
+    return "\n".join(lines)
 
 try:
     from security import validate_path, sanitize_filename, audit_tool_call
@@ -510,6 +544,7 @@ def open_file(file_path):
             subprocess.run(["xdg-open", str(p)], check=True)
         elif sys.platform == "win32":
             os.startfile(str(p))
+        register_recent_file(str(p), p.name, "opened")
         return {"success": True, "opened": str(p)}
     except Exception as e:
         return {"success": False, "message": f"열기 실패: {e}"}
@@ -570,6 +605,12 @@ def open_app(app_name):
     try:
         if sys.platform == "darwin":
             subprocess.run(["open", "-a", resolved], check=True)
+            register_recent_file(resolved, resolved, "app")
+            try:
+                from memory_store import record_app_open
+                record_app_open(resolved)
+            except ImportError:
+                pass
             return {"success": True, "opened": resolved}
         elif sys.platform.startswith("linux"):
             subprocess.Popen([resolved.lower()])

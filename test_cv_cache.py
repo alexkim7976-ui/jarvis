@@ -7,6 +7,7 @@ Cross-Validation 샌드박스 캐시 격리 테스트
 """
 from __future__ import annotations
 
+from speech_style import USER_DISPLAY_NAME
 import json
 import os
 import sys
@@ -183,7 +184,7 @@ def test_on_demand_uses_digest_only_not_raw():
 
             def fake_gemini(prompt, *a, **k):
                 captured_prompt.append(prompt)
-                return "선생님, 엔비디아 합의가 120.5달러입니다."
+                return f"{USER_DISPLAY_NAME}, 엔비디아 합의가 120.5달러입니다."
 
             with patch("cross_validation._enhance_briefing_with_gemini") as mock_enh:
                 mock_enh.side_effect = lambda d, q: (

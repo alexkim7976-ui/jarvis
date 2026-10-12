@@ -19,8 +19,9 @@ Gemini 감성 분석으로 교차 검증한다.
   필수: requests yfinance pandas numpy google-generativeai(이미 프로젝트 사용)
   선택: praw
 """
-
 from __future__ import annotations
+
+from speech_style import USER_DISPLAY_NAME
 
 import json
 import os
@@ -314,7 +315,7 @@ def analyze_social_trends(subreddits: Optional[list] = None, spike_threshold: fl
     message = ""
     if top:
         message = (
-            f"선생님, 현재 레딧 커뮤니티에서 {top['ticker']} 종목의 언급량이 "
+            f"{USER_DISPLAY_NAME}, 현재 레딧 커뮤니티에서 {top['ticker']} 종목의 언급량이 "
             f"{top['spike_ratio']:.0f}배 이상 폭증했습니다. AI 분석 결과 "
             f"{top['risk_label']}으로 판단되오니 주의하십시오."
         )

@@ -2,6 +2,8 @@
 J.A.R.V.I.S — 스크린 오버레이 (한글 지원)
 """
 from __future__ import annotations
+
+from speech_style import USER_DISPLAY_NAME
 import io, json, os, time, threading, cv2, numpy as np
 from pathlib import Path
 from korean_font import put_text, wrap_text
@@ -360,6 +362,9 @@ class ScreenOverlay:
             elif dt=="info": frame=self._draw_info(frame,data)
             elif dt=="image": frame=self._draw_image(frame,data)
             elif dt=="chart": frame=self.render_chart_overlay(frame,data)
+            # 경고 설명문(음성 대신 화면으로만 설명) — 상단 배너 아래 가독성 있는 텍스트 패널
+            if data.get("alert_message"):
+                frame=self._draw_alert_message(frame,data)
         # 레이더 차트 팝업 (테이블이 접힌 만큼 전면에 등장)
         if radar_anim>0.01 and radar_data:
             frame=self._draw_radar(frame, radar_data, radar_anim, theme)
@@ -442,6 +447,34 @@ class ScreenOverlay:
         cv2.rectangle(ov,(0,0),(w,bar_h),(0,0,int(60+pulse*120)),-1)
         cv2.addWeighted(ov,0.5+pulse*0.3,frame,0.5-pulse*0.3,0,frame)
         put_text(frame,banner,(20,28),size=18,color=(255,255,255),bold=True)
+        return frame
+
+    def _draw_alert_message(self,frame,data):
+        """경고 설명문을 화면 상단(긴급 배너 아래)에 여러 줄로 표시.
+        음성 없이 '스크린을 통해서만' 경고 내용을 전달하기 위한 가독성 패널."""
+        msg=str(data.get("alert_message","")).strip()
+        if not msg:
+            return frame
+        h,w=frame.shape[:2]
+        pw=min(w-360, 900)   # 우측 지표 표(px≈w-340)와 겹치지 않도록 폭 제한
+        if pw < 240:
+            pw = min(w-40, 900)
+        lines=wrap_text(msg, pw-28, 16)[:7]
+        if not lines:
+            return frame
+        line_h=25
+        ph=len(lines)*line_h+22
+        x0,y0=20, 46   # 긴급 배너(bar_h=40) 바로 아래
+        ov=frame.copy()
+        cv2.rectangle(ov,(x0,y0),(x0+pw,y0+ph),(6,6,14),-1)
+        cv2.addWeighted(ov,0.74,frame,0.26,0,frame)
+        cv2.rectangle(frame,(x0,y0),(x0+pw,y0+ph),(60,60,255),1)
+        # 좌측 경고 악센트 바
+        cv2.rectangle(frame,(x0,y0),(x0+4,y0+ph),(60,60,255),-1)
+        y=y0+24
+        for ln in lines:
+            put_text(frame,ln,(x0+16,y),size=16,color=(235,235,255))
+            y+=line_h
         return frame
 
     def _draw_theme_border(self,frame,level):
@@ -780,8 +813,8 @@ def execute_display_tool(tool_name, arguments):
                   "alpha":0.72}
             _overlay_instance.set_data(data,dur)
             return {"success":True,
-                    "message":"선생님, 요청하신 두 종목의 최근 Trend 비교 분석 차트를 화면 우측 상단에 동기화했습니다.",
-                    "briefing":"선생님, 요청하신 두 종목의 최근 Trend 비교 분석 차트를 화면 우측 상단에 동기화했습니다.",
+                    "message":f"{USER_DISPLAY_NAME}, 요청하신 두 종목의 최근 Trend 비교 분석 차트를 화면 우측 상단에 동기화했습니다.",
+                    "briefing":f"{USER_DISPLAY_NAME}, 요청하신 두 종목의 최근 Trend 비교 분석 차트를 화면 우측 상단에 동기화했습니다.",
                     "tickers":tickers,
                     "indicator":indicator,
                     "rows":rows}

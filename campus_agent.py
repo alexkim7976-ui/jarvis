@@ -22,16 +22,23 @@ Fall 2026 학기(2026.8 뉴욕 출국) 준비를 위해 Gmail/Calendar 를 백�
   CAMPUS_AGENT_ENABLED=true
   CAMPUS_CHECK_INTERVAL=600        (초, 기본 10분)
   CAMPUS_LOOKBACK_DAYS=3           (Gmail 조회 범위)
+  CAMPUS_GMAIL_ACCOUNT=taehyeon.kim.2@stonybrook.org  (감시·안내 대상 수신 주소만)
 
 의존성:
   pip install google-api-python-client google-auth google-auth-oauthlib
 """
 from __future__ import annotations
 
+from speech_style import USER_DISPLAY_NAME
 import json
+import base64
+import html
 import os
+import re
 import threading
 import time
+import urllib.parse
+import urllib.request
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -42,6 +49,14 @@ from pathlib import Path
 CAMPUS_AGENT_ENABLED  = os.getenv("CAMPUS_AGENT_ENABLED", "true").lower() == "true"
 CAMPUS_CHECK_INTERVAL = int(os.getenv("CAMPUS_CHECK_INTERVAL", "600"))   # 초 (기본 10분)
 CAMPUS_LOOKBACK_DAYS  = int(os.getenv("CAMPUS_LOOKBACK_DAYS", "3"))      # Gmail 조회 범위(일)
+CAMPUS_GMAIL_ACCOUNT  = os.getenv(
+    "CAMPUS_GMAIL_ACCOUNT", "taehyeon.kim.2@stonybrook.org",
+).strip().lower()  # 이 주소로 온 메일만 감시·음성 안내
+CAMPUS_COURSE_SENDER = os.getenv(
+    "CAMPUS_COURSE_SENDER", "taehyeon.kim.2@stonybrook.edu",
+).strip().lower()
+CAMPUS_CALL_TO = os.getenv("CAMPUS_CALL_TO", "+19342217610").strip()
+CAMPUS_CALL_ALERTS = os.getenv("CAMPUS_CALL_ALERTS", "true").strip().lower() == "true"
 
 CRED_DIR   = Path(".credentials")
 CRED_DIR.mkdir(exist_ok=True)
@@ -57,6 +72,14 @@ _SEEN_MAX = 500   # 중복 방지 캐시 상한
 SBU_DOMAIN   = "stonybrook.edu"
 GMAIL_KEYWORDS = ['"SOLAR"', '"I-20"', '"Visa"', '"Immunization"',
                   '"Housing"', '"Enrollment"', '"Advising"', '"Hold"']
+
+# 이 발신자에게서 온 과제·수업 메일만 전화 알림 대상
+COURSE_MAIL_KEYWORDS = (
+    "homework", "assignment", "coursework", "class", "course", "lecture",
+    "syllabus", "quiz", "exam", "test", "midterm", "final", "project",
+    "lab", "recitation", "discussion", "grade", "due", "deadline",
+    "수업", "강의", "과제", "숙제", "시험", "퀴즈", "강의계획서", "마감",
+)
 
 # 분류 규칙 (우선순위 순) — (카테고리, [소문자 매칭어], 긴급여부, 한국어 부서/요약, 영문 alert 태그)
 CLASSIFY_RULES = [
@@ -91,6 +114,71 @@ def _log(level: str, msg: str):
     ts = datetime.now().strftime("%H:%M:%S")
     icons = {"INFO": "◈", "OK": "✓", "WARN": "⚠", "ALERT": "🚨", "AUTH": "🔒"}
     print(f"[{ts}] {icons.get(level, '·')} [캠퍼스] {msg}")
+
+
+def campus_mail_account() -> str:
+    return CAMPUS_GMAIL_ACCOUNT
+
+
+def _extract_emails(header_val: str) -> list[str]:
+    if not header_val:
+        return []
+    return re.findall(r"[\w.+-]+@[\w.-]+\.\w+", header_val.lower())
+
+
+def message_for_campus_account(meta: dict) -> bool:
+    """수신 주소가 CAMPUS_GMAIL_ACCOUNT 와 일치하는 메일만 True."""
+    acct = campus_mail_account()
+    if not acct:
+        return True
+    recipients: list[str] = []
+    for key in ("to", "cc", "delivered_to", "x_original_to", "envelope_to"):
+        recipients.extend(_extract_emails(meta.get(key, "")))
+    return acct in recipients
+
+
+def is_course_mail_from_configured_sender(meta: dict) -> bool:
+    """요청된 발신 주소의 메일 중 숙제·수업 관련 내용만 전화 알림 대상으로 판별."""
+    sender = CAMPUS_COURSE_SENDER
+    if not sender:
+        return False
+    if sender not in _extract_emails(meta.get("from", "")):
+        return False
+    content = f"{meta.get('subject', '')} {meta.get('snippet', '')}".casefold()
+    return any(keyword.casefold() in content for keyword in COURSE_MAIL_KEYWORDS)
+
+
+def _place_course_email_call(message: str) -> str:
+    """Twilio Voice를 통해 수업·과제 메일 알림 전화를 건다."""
+    if not CAMPUS_CALL_ALERTS:
+        return "skipped: call alerts disabled"
+    sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+    token = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+    from_number = os.getenv("TWILIO_FROM_NUMBER", "").strip()
+    if not (sid and token and from_number and CAMPUS_CALL_TO):
+        return "skipped: Twilio Voice configuration required"
+    twiml = (
+        "<Response><Say language=\"ko-KR\">"
+        + html.escape(message)
+        + "</Say></Response>"
+    )
+    body = urllib.parse.urlencode({
+        "To": CAMPUS_CALL_TO,
+        "From": from_number,
+        "Twiml": twiml,
+    }).encode("utf-8")
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Calls.json"
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    auth = base64.b64encode(f"{sid}:{token}".encode("utf-8")).decode("ascii")
+    req.add_header("Authorization", f"Basic {auth}")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        return f"started: {result.get('sid', 'unknown')}" if result.get("sid") else "failed"
+    except Exception:
+        # 예외 문자열에 인증 정보가 포함될 수 있어 상세 URL/오류는 기록하지 않는다.
+        return "failed"
 
 
 def _find_client_secret() -> Path | None:
@@ -137,7 +225,8 @@ class CampusAgent:
         self._running = True
         self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._thread.start()
-        _log("OK", f"감시 시작 — 간격={self.interval}초 | 조회범위={CAMPUS_LOOKBACK_DAYS}일")
+        _log("OK", f"감시 시작 — 간격={self.interval}초 | 조회범위={CAMPUS_LOOKBACK_DAYS}일"
+                 f" | 수신={campus_mail_account() or '전체'}")
 
     def stop(self):
         self._running = False
@@ -249,11 +338,24 @@ class CampusAgent:
             meta = self._get_message_meta(mid)
             if not meta:
                 continue
+            course_mail = is_course_mail_from_configured_sender(meta)
+            if not message_for_campus_account(meta):
+                if not course_mail:
+                    self._mark_seen(mid)
+                    continue
+            elif not course_mail:
+                # 기존 캠퍼스 메일 감시 경로는 이전처럼 대상 수신 주소만 처리
+                pass
             self._mark_seen(mid)
             new_count += 1
 
-            category, dept_ko, urgent, alert_tag = self._classify(
-                meta["subject"], meta["from"], meta["snippet"])
+            if course_mail:
+                category, dept_ko, urgent, alert_tag = (
+                    "숙제·수업", "수업/과제", True, "Course / Homework Email",
+                )
+            else:
+                category, dept_ko, urgent, alert_tag = self._classify(
+                    meta["subject"], meta["from"], meta["snippet"])
 
             self._last_mail_log.insert(0, {
                 "subject": meta["subject"][:60],
@@ -265,6 +367,19 @@ class CampusAgent:
             self._last_mail_log = self._last_mail_log[:10]
 
             evt = self._make_event(meta, category, dept_ko, urgent, alert_tag)
+            if course_mail:
+                alert_message = (
+                    f"JARVIS 알림입니다. 수업 또는 숙제 관련 메일이 왔습니다. "
+                    f"보낸 사람은 {meta['from'][:120]}입니다. "
+                    f"제목은 {meta['subject'][:160]}입니다. 이메일을 확인해 주세요."
+                )
+                try:
+                    message_status = _place_course_email_call(alert_message)
+                    _log("INFO", f"수업 메일 전화 알림: {message_status}")
+                except Exception as e:
+                    message_status = f"failed: {type(e).__name__}"
+                    _log("WARN", f"수업 메일 전화 발신 실패: {type(e).__name__}")
+                evt["phone_call_status"] = message_status
             with self._lock:
                 self._event_q.append(evt)
             self._total_alerts += 1
@@ -275,19 +390,42 @@ class CampusAgent:
             self._save_seen()
 
     def _build_query(self) -> str:
+        if CAMPUS_COURSE_SENDER:
+            # sender 검색은 정확한 주소로 제한하고 수업·과제 단어를 Gmail에서 선필터링
+            academic_query = "{" + " ".join(COURSE_MAIL_KEYWORDS) + "}"
+            return (
+                f"from:{CAMPUS_COURSE_SENDER} {academic_query} "
+                f"newer_than:{CAMPUS_LOOKBACK_DAYS}d"
+                f" OR (({self._campus_query_terms()}) newer_than:{CAMPUS_LOOKBACK_DAYS}d)"
+            )
+        return f"({self._campus_query_terms()}) newer_than:{CAMPUS_LOOKBACK_DAYS}d"
+
+    def _campus_query_terms(self) -> str:
         kw = " OR ".join([f"from:{SBU_DOMAIN}"] + GMAIL_KEYWORDS)
-        return f"({kw}) newer_than:{CAMPUS_LOOKBACK_DAYS}d"
+        acct = campus_mail_account()
+        if acct:
+            recipient = f"(deliveredto:{acct} OR to:{acct})"
+            return f"{recipient} ({kw})"
+        return f"({kw})"
 
     def _get_message_meta(self, msg_id: str) -> dict | None:
         try:
             msg = self._gmail.users().messages().get(
                 userId="me", id=msg_id, format="metadata",
-                metadataHeaders=["From", "Subject", "Date"]).execute()
+                metadataHeaders=[
+                    "From", "To", "Cc", "Subject", "Date",
+                    "Delivered-To", "X-Original-To", "Envelope-To",
+                ]).execute()
             headers = {h["name"].lower(): h["value"]
                        for h in msg.get("payload", {}).get("headers", [])}
             return {
                 "id":      msg_id,
                 "from":    headers.get("from", ""),
+                "to":      headers.get("to", ""),
+                "cc":      headers.get("cc", ""),
+                "delivered_to": headers.get("delivered-to", ""),
+                "x_original_to": headers.get("x-original-to", ""),
+                "envelope_to": headers.get("envelope-to", ""),
                 "subject": headers.get("subject", "(제목 없음)"),
                 "date":    headers.get("date", ""),
                 "snippet": msg.get("snippet", ""),
@@ -311,12 +449,15 @@ class CampusAgent:
                     urgent: bool, alert_tag: str) -> dict:
         subject = meta["subject"]
         # TTS 대사
-        if urgent:
-            message = (f"선생님, 스토니브룩 {dept_ko}에서 {category} 관련 긴급 메일이 "
+        if category == "숙제·수업":
+            message = (f"{USER_DISPLAY_NAME}, 수업 또는 숙제 관련 메일이 도착했습니다. "
+                       f"제목은 '{subject[:60]}'입니다. 이메일을 확인해 주세요.")
+        elif urgent:
+            message = (f"{USER_DISPLAY_NAME}, 스토니브룩 {dept_ko}에서 {category} 관련 긴급 메일이 "
                        f"도착했습니다. 제목은 '{subject[:40]}'입니다. "
                        f"행정 보류(Hold) 리스크가 있을 수 있으니 확인이 필요합니다.")
         else:
-            message = (f"선생님, 스토니브룩 {dept_ko}에서 {category} 관련 메일이 도착했습니다. "
+            message = (f"{USER_DISPLAY_NAME}, 스토니브룩 {dept_ko}에서 {category} 관련 메일이 도착했습니다. "
                        f"제목은 '{subject[:40]}'입니다.")
 
         alert_text = f"CAMPUS ALERT: {alert_tag}"
@@ -391,6 +532,85 @@ class CampusAgent:
             self._svc_ready = False
             return {"success": False, "message": f"학사 일정 조회 오류: {e}"}
 
+    def get_next_class(self) -> dict:
+        """다음 수업 — Campus Quest JSON 우선, Google Calendar 폴백."""
+        try:
+            from campus_schedule import next_class_from_schedule, format_next_class_briefing, is_class_like_event
+            local = next_class_from_schedule()
+            if local:
+                msg = format_next_class_briefing(local)
+                loc = local.get("location") or local.get("building") or "-"
+                return {
+                    "success": True,
+                    "course": local.get("course"),
+                    "location": loc,
+                    "start_time": local.get("start_time"),
+                    "starts_in_min": local.get("starts_in_min"),
+                    "source": local.get("source"),
+                    "message": msg,
+                    "overlay_table": {
+                        "type": "table",
+                        "title": "🎓 다음 수업 (Campus Quest)",
+                        "headers": ["과목", "장소", "시작", "남은 시간"],
+                        "rows": [[local.get("course", "-"), loc, local.get("start_time", "-"),
+                                  f"{local.get('starts_in_min', 0)}분"]],
+                    },
+                }
+        except Exception:
+            pass
+
+        if not self._ensure_services() or self._cal is None:
+            return {"success": False,
+                    "message": "수업 시간표가 없습니다. data/campus_schedule.json 을 추가하거나 캘린더를 연동해 주세요."}
+        try:
+            from campus_schedule import is_class_like_event, format_next_class_briefing
+            from datetime import timezone
+            now_utc = datetime.now(timezone.utc)
+            tmin = now_utc.isoformat().replace("+00:00", "Z")
+            tmax = (now_utc + timedelta(hours=36)).isoformat().replace("+00:00", "Z")
+            r = self._cal.events().list(
+                calendarId="primary", timeMin=tmin, timeMax=tmax,
+                maxResults=20, singleEvents=True, orderBy="startTime").execute()
+            for ev in r.get("items", []):
+                title = ev.get("summary", "")
+                loc = ev.get("location", "")
+                if not is_class_like_event(title, loc):
+                    continue
+                sr = ev.get("start", {})
+                sd = sr.get("dateTime", sr.get("date", ""))
+                if not sd or "T" not in sd:
+                    continue
+                try:
+                    st = datetime.fromisoformat(sd.replace("Z", "+00:00"))
+                    if st.tzinfo is None:
+                        st = st.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+                delta_min = int(max(0, (st - now_utc).total_seconds() / 60))
+                local_st = st.astimezone()
+                info = {
+                    "course": title,
+                    "location": loc or "장소 미등록",
+                    "start_time": local_st.strftime("%H:%M"),
+                    "starts_in_min": delta_min,
+                    "source": "google_calendar",
+                }
+                msg = format_next_class_briefing(info)
+                return {
+                    "success": True,
+                    **info,
+                    "message": msg,
+                    "overlay_table": {
+                        "type": "table",
+                        "title": "🎓 다음 수업",
+                        "headers": ["과목", "장소", "시작", "남은 시간"],
+                        "rows": [[title[:40], loc or "-", info["start_time"], f"{delta_min}분"]],
+                    },
+                }
+            return {"success": False, "message": "다음 36시간 내 수업 일정을 찾지 못했습니다."}
+        except Exception as e:
+            return {"success": False, "message": f"다음 수업 조회 오류: {e}"}
+
     # ── 중복 방지 캐시 ──
     def _load_seen(self) -> set:
         if SEEN_FILE.exists():
@@ -422,6 +642,7 @@ class CampusAgent:
             "total_alerts":  self._total_alerts,
             "seen_cached":   len(self._seen_ids),
             "last_error":    self._last_error or "정상",
+            "mail_account":  campus_mail_account(),
             "recent_mail":   self._last_mail_log[:5],
             "token_exists":  TOKEN_FILE.exists(),
         }
@@ -452,10 +673,23 @@ CAMPUS_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_next_class_location",
+            "description": (
+                "다음 수업의 과목명·강의실·시작 시간을 조회합니다. "
+                "'다음 수업 어디야', '수업 몇 시야', '강의실 어디' 등 SBU 캠퍼스 수업 질문에 사용."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "refresh_campus_agent_status",
             "description": (
-                "캠퍼스 감시 에이전트의 Gmail/캘린더 연동 무결성과 최근 감지된 스토니브룩 "
-                "행정 메일 로그를 확인합니다. '캠퍼스 감시 상태', '메일 감시 잘 되고 있어?' 등에 사용."
+                "캠퍼스 감시 에이전트의 Gmail/캘린더 연동 무결성과 "
+                f"최근 감지된 스토니브룩 행정 메일({campus_mail_account() or '설정된 계정'}) "
+                "로그를 확인합니다. '캠퍼스 감시 상태', '메일 왔어?', '스토니브룩 메일 확인' 등에 사용. "
+                "다른 개인 메일함은 보고하지 않습니다."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
@@ -479,16 +713,23 @@ def execute_campus_tool(tool_name: str, arguments: dict) -> dict:
         days = int(arguments.get("days", 60))
         return _agent_instance.get_academic_schedule(days=days)
 
+    if tool_name == "get_next_class_location":
+        return _agent_instance.get_next_class()
+
     if tool_name == "refresh_campus_agent_status":
         st = _agent_instance.status
+        acct = st.get("mail_account") or campus_mail_account()
         recent = st.get("recent_mail", [])
+        acct_label = acct or "전체"
         if recent:
             lines = "; ".join(f"[{m['category']}] {m['subject']}" for m in recent[:3])
             msg = (f"캠퍼스 감시 {'정상 작동 중' if st['services_ready'] else '폴백 모드(인증 대기)'}. "
+                   f"수신 주소 {acct_label} 기준. "
                    f"누적 감지 {st['total_alerts']}건. 최근: {lines}")
         else:
             msg = (f"캠퍼스 감시 {'정상 작동 중' if st['services_ready'] else '폴백 모드(인증 대기)'}. "
-                   f"아직 감지된 행정 메일이 없습니다. 상태: {st['last_error']}")
+                   f"수신 주소 {acct_label} 로 온 행정 메일은 아직 없습니다. "
+                   f"상태: {st['last_error']}")
         return {"success": True, **st, "message": msg,
                 "overlay_table": {
                     "type": "table",
@@ -496,6 +737,7 @@ def execute_campus_tool(tool_name: str, arguments: dict) -> dict:
                     "headers": ["항목", "값"],
                     "rows": [
                         ["연동",     "정상" if st["services_ready"] else "폴백(인증 필요)"],
+                        ["수신 주소", acct_label],
                         ["점검 횟수", str(st["checks"])],
                         ["누적 알림", str(st["total_alerts"])],
                         ["캐시",     f"{st['seen_cached']}건"],

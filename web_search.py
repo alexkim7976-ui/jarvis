@@ -13,19 +13,37 @@ except Exception:
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
+try:
+    from free_mode import free_only_enabled, use_paid_search
+    from free_search import duckduckgo_search, duckduckgo_news_search
+except ImportError:
+    def free_only_enabled():  # type: ignore
+        return False
+    def use_paid_search():  # type: ignore
+        return bool(TAVILY_API_KEY)
+    duckduckgo_search = None  # type: ignore
+    duckduckgo_news_search = None  # type: ignore
+
 
 # ──────────────────────────────────────────────
-#  Tavily 검색 함수
+#  Tavily / DuckDuckGo 검색 함수
 # ──────────────────────────────────────────────
 
 def web_search(query, search_depth="basic", max_results=5):
     """
-    Tavily API로 웹 검색
+    웹 검색 — 무료 모드: DuckDuckGo / 유료: Tavily API
     - query: 검색어
     - search_depth: "basic" (빠름) 또는 "advanced" (정밀)
     - max_results: 최대 결과 수
     """
+    if free_only_enabled() or not use_paid_search():
+        if duckduckgo_search:
+            return duckduckgo_search(query, max_results=max_results)
+        return {"success": False, "message": "무료 검색 모듈을 불러올 수 없습니다."}
+
     if not TAVILY_API_KEY:
+        if duckduckgo_search:
+            return duckduckgo_search(query, max_results=max_results)
         return {"success": False, "message": "TAVILY_API_KEY가 .env에 설정되지 않았습니다."}
 
     url = "https://api.tavily.com/search"
@@ -73,9 +91,16 @@ def web_search(query, search_depth="basic", max_results=5):
 
 def news_search(query, max_results=5):
     """
-    뉴스 검색 (Tavily topic=news)
+    뉴스 검색 — 무료 모드: DuckDuckGo / 유료: Tavily topic=news
     """
+    if free_only_enabled() or not use_paid_search():
+        if duckduckgo_news_search:
+            return duckduckgo_news_search(query, max_results=max_results)
+        return {"success": False, "message": "무료 검색 모듈을 불러올 수 없습니다."}
+
     if not TAVILY_API_KEY:
+        if duckduckgo_news_search:
+            return duckduckgo_news_search(query, max_results=max_results)
         return {"success": False, "message": "TAVILY_API_KEY가 .env에 설정되지 않았습니다."}
 
     url = "https://api.tavily.com/search"

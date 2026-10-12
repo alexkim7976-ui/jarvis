@@ -10,13 +10,16 @@ J.A.R.V.I.S — 금융 퀀트 분석 에이전트
 
 의존성: pip install yfinance pandas numpy
 """
-
 from __future__ import annotations
+
+from speech_style import USER_DISPLAY_NAME
 
 import difflib
 import json
 import logging
 import math
+import re
+import statistics
 import unicodedata
 from datetime import datetime, timedelta
 
@@ -182,7 +185,13 @@ def get_macro_market_status(force_refresh: bool = False) -> dict:
         "title": f"MACRO GUARDRAIL | {risk_level}",
         "headers": ["지표", "현재", "1M", "위험"],
         "rows": rows,
+        "theme": risk_level,
     }
+    fx_reasons = [r for r in reasons if "환율" in r or "원달러" in r]
+    if fx_reasons:
+        overlay_table["alert_text"] = f"⚠ 환율 상승 — {fx_reasons[0]}"
+    elif risk_level in ("위험", "경계") and reasons:
+        overlay_table["alert_text"] = f"⚠ 매크로 {risk_level} — {reasons[0]}"
 
     if guardrail_active:
         briefing = (
@@ -628,36 +637,197 @@ def resolve_alert_query(query: str, strong_cutoff: float = 0.86) -> dict:
             "candidates": suggest_stock_candidates(qa, n=5)}
 
 
+def _kr_stock_code(ticker: str) -> str | None:
+    """한국 6자리 종목코드 추출 (.KS/.KQ 또는 숫자)."""
+    t = (ticker or "").strip().upper()
+    if re.match(r"^\d{6}$", t):
+        return t
+    if t.endswith(".KS") or t.endswith(".KQ"):
+        return t.split(".")[0]
+    return None
+
+
+def _df_from_kis_daily(rows: list) -> pd.DataFrame:
+    """KIS 일봉 output2 → OHLCV DataFrame."""
+    records = []
+    for r in rows or []:
+        d = str(r.get("stck_bsop_date") or "")
+        if len(d) != 8:
+            continue
+        try:
+            records.append({
+                "Date": pd.Timestamp(f"{d[:4]}-{d[4:6]}-{d[6:8]}"),
+                "Open": float(r.get("stck_oprc") or 0),
+                "High": float(r.get("stck_hgpr") or 0),
+                "Low": float(r.get("stck_lwpr") or 0),
+                "Close": float(r.get("stck_clpr") or 0),
+                "Volume": int(float(r.get("acml_vol") or 0)),
+            })
+        except (TypeError, ValueError):
+            continue
+    if not records:
+        return pd.DataFrame()
+    df = pd.DataFrame(records).sort_values("Date").set_index("Date")
+    return df
+
+
+_LIVE_ENRICH_FIELDS = ("per", "pbr", "eps", "market_cap",
+                       "open", "high", "low", "volume", "change_pct", "name")
+
+
+def _enrich_quote(base: dict, extra: dict) -> dict:
+    """base 에 없는 필드를 extra 값으로 보강 (누락/0 만 채움)."""
+    for k in _LIVE_ENRICH_FIELDS:
+        if not base.get(k) and extra.get(k) is not None:
+            base[k] = extra[k]
+    return base
+
+
+def _best_live_quote(resolved: str, kr_code: str | None) -> dict | None:
+    """무료 소스 다중 병합 실시간 시세 (Gemini 미사용).
+
+    · 한국: 증권사(KIS/Kiwoom/LS, 권위 체결가) + 네이버(키 불필요, PER/PBR/EPS) 병합.
+    · 해외: Finnhub → FMP → Alpha → Yahoo → Stooq 순 첫 유효 시세 + Finnhub 지표 보강.
+    여러 소스가 가격을 주면 중앙값 대비 2% 이상 이탈은 이상치로 제외한 뒤 중앙값 채택.
+    """
+    try:
+        from data_providers import get_provider
+    except ImportError:
+        return None
+
+    if kr_code:
+        merged: dict | None = None
+        source = None
+        prices: list[float] = []
+        # 증권사 체결가 (권위) — 활성/도달 가능한 첫 소스
+        for name in ("kis", "kiwoom", "ls"):
+            p = get_provider(name)
+            if p and getattr(p, "enabled", False) and hasattr(p, "quote"):
+                q = p.quote(kr_code)
+                if q.get("success") and q.get("price"):
+                    merged = dict(q); source = name.upper()
+                    prices.append(float(q["price"]))
+                    break
+        # 네이버(키 불필요) — 항상 시도해 현재가 교차확인 + 펀더멘털 보강
+        nav = get_provider("naver")
+        if nav and getattr(nav, "enabled", False):
+            nq = nav.quote(kr_code)
+            if nq.get("success") and nq.get("price"):
+                prices.append(float(nq["price"]))
+                if merged is None:
+                    merged = dict(nq); source = "NAVER"
+                else:
+                    _enrich_quote(merged, nq)
+        if merged is not None:
+            # 다중 가격 합의: 중앙값 대비 2% 이내만 평균
+            if len(prices) >= 2:
+                med = statistics.median(prices)
+                kept = [x for x in prices if abs(x - med) / med <= 0.02] or [med]
+                merged["price"] = sum(kept) / len(kept)
+                merged["price_sources"] = len(prices)
+            merged.setdefault("source", source or "KR")
+            return merged
+
+    # 해외
+    global_merged: dict | None = None
+    for name in ("finnhub", "fmp", "alpha_vantage", "yahoo", "stooq"):
+        p = get_provider(name)
+        if not p or not getattr(p, "enabled", False):
+            continue
+        sym = resolved if name in ("yahoo", "stooq") else resolved.split(".")[0]
+        q = p.quote(sym)
+        if q.get("success") and q.get("price"):
+            global_merged = dict(q); global_merged["source"] = name.upper()
+            # Finnhub 지표(PER/PBR/EPS) 보강
+            if name == "finnhub" and hasattr(p, "metric"):
+                try:
+                    m = p.metric(sym)
+                    if m.get("success"):
+                        _enrich_quote(global_merged, {
+                            "per": m.get("per"), "pbr": m.get("pbr"),
+                            "eps": m.get("eps"), "market_cap": m.get("market_cap"),
+                        })
+                except Exception:
+                    pass
+            break
+    return global_merged
+
+
+def _apply_live_quote(df: pd.DataFrame, quote: dict) -> pd.DataFrame:
+    """마지막 봉에 실시간 시세 반영(지표 정확도 향상)."""
+    if df is None or df.empty or not quote:
+        return df
+    df = df.copy()
+    price = float(quote["price"])
+    hi = float(quote.get("high") or price)
+    lo = float(quote.get("low") or price)
+    op = float(quote.get("open") or df["Open"].iloc[-1])
+    vol = int(quote.get("volume") or df["Volume"].iloc[-1])
+    df.iloc[-1, df.columns.get_loc("Close")] = price
+    df.iloc[-1, df.columns.get_loc("High")] = max(float(df["High"].iloc[-1]), hi, price)
+    df.iloc[-1, df.columns.get_loc("Low")] = min(float(df["Low"].iloc[-1]), lo, price)
+    df.iloc[-1, df.columns.get_loc("Open")] = op
+    df.iloc[-1, df.columns.get_loc("Volume")] = vol
+    return df
+
+
 def fetch_stock_data(ticker: str, period="6mo"):
-    """yfinance로 주가 + 재무 데이터 수집"""
+    """실시간 시세(data_providers) + OHLCV(yfinance/KIS) — Gemini 미사용."""
     if not YF_AVAILABLE:
         return None, None, "yfinance 미설치. pip install yfinance"
 
+    resolved = _resolve_ticker(ticker)
+    kr_code = _kr_stock_code(resolved)
+    live = _best_live_quote(resolved, kr_code)
+    data_source = live.get("source") if live else "YAHOO"
+
+    df = pd.DataFrame()
+    # 1) 한국 종목 + KIS 활성 → KIS 일봉 우선
+    if kr_code:
+        try:
+            from data_providers import get_provider
+            kis = get_provider("kis")
+            if kis and getattr(kis, "enabled", False) and hasattr(kis, "chart_daily"):
+                days = 180 if period in ("6mo", "3mo") else 365
+                ch = kis.chart_daily(kr_code, days=days)
+                if ch.get("success") and ch.get("rows"):
+                    df = _df_from_kis_daily(ch["rows"])
+                    data_source = "KIS"
+        except Exception:
+            pass
+
+    # 2) yfinance 폴백/보완
+    if df.empty:
+        try:
+            stock = yf.Ticker(resolved)
+            df = stock.history(period=period, auto_adjust=True)
+        except Exception as e:
+            return None, None, f"데이터 수집 오류: {e}"
+
+    if df.empty:
+        hint = ""
+        if _is_hangul(ticker):
+            near = difflib.get_close_matches(
+                ticker, list(_KR_TICKER_MAP.keys()), n=3, cutoff=0.3)
+            if near:
+                hint = f" 혹시 다음 종목을 말씀하셨나요? {', '.join(near)}"
+        return None, None, f"'{ticker}' 종목을 찾지 못했습니다.{hint}"
+
+    if live:
+        df = _apply_live_quote(df, live)
+
     try:
-        stock = yf.Ticker(ticker)
-        df = stock.history(period=period, auto_adjust=True)
-
-        if df.empty:
-            hint = ""
-            if _is_hangul(ticker):
-                near = difflib.get_close_matches(
-                    ticker, list(_KR_TICKER_MAP.keys()), n=3, cutoff=0.3
-                )
-                if near:
-                    hint = f" 혹시 다음 종목을 말씀하셨나요? {', '.join(near)}"
-            return None, None, f"'{ticker}' 종목을 찾지 못했습니다. 종목명이나 티커를 확인해 주세요.{hint}"
-
-        # 재무 정보
+        stock = yf.Ticker(resolved)
         info = stock.info or {}
         fundamentals = {
-            "name": info.get("shortName", info.get("longName", ticker)),
-            "currency": info.get("currency", ""),
-            "price": info.get("currentPrice", info.get("regularMarketPrice", 0)),
-            "market_cap": info.get("marketCap", 0),
-            "per": info.get("trailingPE", info.get("forwardPE", None)),
-            "pbr": info.get("priceToBook", None),
+            "name": (live or {}).get("name") or info.get("shortName", info.get("longName", resolved)),
+            "currency": info.get("currency", "KRW" if kr_code else "USD"),
+            "price": float(live["price"]) if live else info.get("currentPrice", info.get("regularMarketPrice", 0)),
+            "market_cap": (live or {}).get("market_cap") or info.get("marketCap", 0),
+            "per": (live or {}).get("per") or info.get("trailingPE", info.get("forwardPE", None)),
+            "pbr": (live or {}).get("pbr") or info.get("priceToBook", None),
             "roe": (info.get("returnOnEquity", 0) or 0) * 100,
-            "eps": info.get("trailingEps", None),
+            "eps": (live or {}).get("eps") or info.get("trailingEps", None),
             "dividend_yield": (info.get("dividendYield", 0) or 0) * 100,
             "debt_to_equity": info.get("debtToEquity", None),
             "revenue_growth": (info.get("revenueGrowth", 0) or 0) * 100,
@@ -667,7 +837,6 @@ def fetch_stock_data(ticker: str, period="6mo"):
             "avg_volume": info.get("averageVolume", 0),
             "sector": info.get("sector", ""),
             "industry": info.get("industry", ""),
-            # 로컬 DCF·Graham 입력
             "fcf": info.get("freeCashflow"),
             "total_debt": info.get("totalDebt"),
             "cash": info.get("totalCash") or info.get("cash"),
@@ -675,10 +844,10 @@ def fetch_stock_data(ticker: str, period="6mo"):
             "fcf_growth": (info.get("revenueGrowth", 0) or 0) * 100,
             "earnings_growth": (info.get("earningsGrowth", 0) or 0) * 100
             if info.get("earningsGrowth") is not None else None,
+            "data_source": data_source,
+            "change_pct": (live or {}).get("change_pct"),
         }
-
         return df, fundamentals, None
-
     except Exception as e:
         return None, None, f"데이터 수집 오류: {e}"
 
@@ -1160,7 +1329,7 @@ def _generate_briefing(name, ticker, price, fund, scoring, portfolio, macro_stat
     is_kr = ".KS" in ticker or ".KQ" in ticker
     p_str = f"{price:,.0f}원" if is_kr else f"${price:,.2f}"
 
-    parts = [f"선생님, {name} 종합 분석 결과를 보고드립니다."]
+    parts = [f"{USER_DISPLAY_NAME}, {name} 종합 분석 결과를 보고드립니다."]
     parts.append(f"현재가 {p_str}, 투자 점수 100점 만점에 {score}점으로 {grade_kr} 등급입니다.")
 
     # 핵심 근거 (상위 3개)
@@ -1661,7 +1830,7 @@ def _generate_matrix_briefing(
 
     tech_desc = "·".join(key_tech[:2]) if key_tech else "복합 기술 지표 혼조"
 
-    parts = [f"선생님, {name} 종합 투자 매트릭스 분석 결과를 보고드립니다."]
+    parts = [f"{USER_DISPLAY_NAME}, {name} 종합 투자 매트릭스 분석 결과를 보고드립니다."]
     parts.append(
         f"기술적 지표는 {tech_desc}를 보이고 있으며, "
         f"퀀트 레이어 점수 {tech_score}점입니다."
@@ -1945,8 +2114,27 @@ def get_comprehensive_matrix_score(ticker: str) -> dict:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def get_stock_quote(ticker: str) -> dict:
-    """현재가·등락률·거래량 빠른 조회 (yfinance 5d)"""
+    """실시간 현재가 (KIS/Kiwoom/FMP/Yahoo — Gemini 미사용)."""
     resolved = _resolve_ticker(ticker)
+    kr_code = _kr_stock_code(resolved)
+    live = _best_live_quote(resolved, kr_code)
+    if live:
+        name = live.get("name") or resolved
+        curr = float(live["price"])
+        chg_p = float(live.get("change_pct") or 0)
+        chg = float(live.get("change") or 0)
+        vol = int(live.get("volume") or 0)
+        csym = "₩" if kr_code else "$"
+        sign = "▲" if chg >= 0 else "▼"
+        briefing = (
+            f"{name} [{live.get('source','LIVE')}] 현재가 {csym}{curr:,.0f}. "
+            f"{sign} {abs(chg_p):.2f}% ({'+' if chg>=0 else ''}{chg:,.0f}). "
+            f"거래량 {vol:,}."
+        )
+        return {"success": True, "ticker": resolved, "name": name,
+                "price": curr, "change": round(chg, 2), "change_pct": round(chg_p, 2),
+                "volume": vol, "data_source": live.get("source"),
+                "currency": "KRW" if kr_code else "USD", "briefing": briefing}
     try:
         stock = yf.Ticker(resolved)
         info = stock.info or {}
@@ -2101,6 +2289,28 @@ STOCK_QUANT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "verify_stock_indicators",
+            "description": (
+                "실시간 주가(data_providers)와 14개 기술 지표(RSI,MACD,볼린저,일목,ADX,SAR 등)를 "
+                "Gemini 없이 로컬 연산으로 검증합니다. "
+                "'지표 확인해줘', 'RSI MACD 알려줘', '기술적 지표 검증', "
+                "'삼성전자 지표 분석' 같은 요청에 사용하세요."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "종목명 또는 티커 (예: 삼성전자, AAPL, 005930.KS)",
+                    },
+                },
+                "required": ["ticker"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_stock_quote",
             "description": (
                 "특정 종목의 현재가, 전일 대비 등락률, 거래량을 즉시 조회합니다. "
@@ -2159,6 +2369,18 @@ def execute_stock_tool(tool_name, arguments):
             "overlay_table": macro.get("overlay_table"),
             "message": macro.get("message", ""),
         }
+
+    if tool_name == "verify_stock_indicators":
+        try:
+            if isinstance(arguments, str):
+                arguments = json.loads(arguments)
+            ticker = (arguments.get("ticker") or "").strip()
+            if not ticker:
+                return {"success": False, "message": "ticker 파라미터가 필요합니다."}
+            from 주식_입력받고_확인_py import verify_stock
+            return verify_stock(ticker)
+        except Exception as e:
+            return {"success": False, "message": f"지표 검증 오류: {e}"}
 
     if tool_name == "get_stock_quote":
         try:

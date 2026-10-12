@@ -16,6 +16,7 @@ class IronManHUD:
         self._audio_levels=[0]*40; self._audio_lock=threading.Lock()
         self._frame_count=0; self._boot_time=time.time()
         self._scan_y=0
+        self._proc_start=0.0; self._prev_state="IDLE"   # PROCESSING 경과시간 추적
         self._particles=[]
         for _ in range(15):
             self._particles.append({"x":random.uniform(0,1),"y":random.uniform(0,1),
@@ -46,6 +47,10 @@ class IronManHUD:
 
     def render(self, frame, state="IDLE", transcript="", answer="", face_count=0, llm_provider="gemini"):
         self._frame_count+=1; h,w=frame.shape[:2]; t=time.time()
+        # PROCESSING 진입 시점 기록 → 경과시간 계산(오래 걸려도 진행 중임을 안심시키기)
+        if state=="PROCESSING" and self._prev_state!="PROCESSING":
+            self._proc_start=t
+        self._prev_state=state
         tint=np.zeros_like(frame); tint[:]=(12,8,4)
         cv2.addWeighted(frame,0.92,tint,0.08,0,frame)
         self._draw_scan_line(frame,h,w)
@@ -58,9 +63,33 @@ class IronManHUD:
         self._draw_bottom_text(frame,h,w,transcript,answer)
         self._draw_particles(frame,h,w)
         self._draw_system_info(frame,h,w)
+        if state=="PROCESSING":
+            self._draw_processing_banner(frame,h,w,t)
         if state=="RECORDING":
             pulse=int(abs(math.sin(t*4))*80)+40
             cv2.rectangle(frame,(0,0),(w-1,h-1),(0,0,pulse),2)
+        return frame
+
+    def _draw_processing_banner(self,frame,h,w,t):
+        """처리 중임을 명확히 알리는 상단 중앙 배너 — 회전 스피너 + 점 애니메이션 + 경과 초.
+        요청이 오래 걸려도 사용자가 '지금 처리 중'임을 항상 인지할 수 있도록 항상 표시."""
+        elapsed=t-(self._proc_start or t)
+        bw,bh=380,64
+        x0=w//2-bw//2; y0=58
+        # 반투명 앰버 패널
+        ov=frame.copy()
+        cv2.rectangle(ov,(x0,y0),(x0+bw,y0+bh),(20,15,5),-1)
+        cv2.addWeighted(ov,0.66,frame,0.34,0,frame)
+        cv2.rectangle(frame,(x0,y0),(x0+bw,y0+bh),AMBER,1,cv2.LINE_AA)
+        # 좌측 회전 스피너
+        sc=(x0+30,y0+bh//2); a=int(t*300)%360
+        cv2.circle(frame,sc,13,CYAN_DARK,1,cv2.LINE_AA)
+        cv2.ellipse(frame,sc,(13,13),0,a,a+270,AMBER,2,cv2.LINE_AA)
+        # 점(...) 애니메이션 텍스트
+        dots="."*((int(t*2)%3)+1)
+        put_text(frame,f"분석 처리 중{dots}",(x0+56,y0+26),size=19,color=(0,220,255),bold=True)
+        put_text(frame,f"경과 {elapsed:0.0f}초 · 잠시만 기다려 주세요",
+                 (x0+56,y0+50),size=13,color=(0,200,255))
         return frame
 
     def _draw_top_bar(self,frame,w,state,llm):
@@ -141,7 +170,7 @@ class IronManHUD:
         y+=22; cv2.putText(frame,"STT",(px,y),cv2.FONT_HERSHEY_SIMPLEX,0.28,CYAN_DIM,1,cv2.LINE_AA)
         cv2.putText(frame,"WHISPER",(px+65,y),cv2.FONT_HERSHEY_SIMPLEX,0.30,GREEN,1,cv2.LINE_AA)
         y+=22; cv2.putText(frame,"TTS",(px,y),cv2.FONT_HERSHEY_SIMPLEX,0.28,CYAN_DIM,1,cv2.LINE_AA)
-        cv2.putText(frame,"FISH",(px+65,y),cv2.FONT_HERSHEY_SIMPLEX,0.30,GREEN,1,cv2.LINE_AA)
+        cv2.putText(frame,"SIRI",(px+65,y),cv2.FONT_HERSHEY_SIMPLEX,0.30,GREEN,1,cv2.LINE_AA)
         y+=22; cv2.putText(frame,"FACES",(px,y),cv2.FONT_HERSHEY_SIMPLEX,0.28,CYAN_DIM,1,cv2.LINE_AA)
         cv2.putText(frame,str(fc),(px+65,y),cv2.FONT_HERSHEY_SIMPLEX,0.30,GREEN if fc>0 else CYAN_DIM,1,cv2.LINE_AA)
         y+=22; cv2.putText(frame,"FRAME",(px,y),cv2.FONT_HERSHEY_SIMPLEX,0.28,CYAN_DIM,1,cv2.LINE_AA)

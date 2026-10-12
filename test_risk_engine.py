@@ -13,6 +13,8 @@ risk_engine 자율 시뮬레이션 엔진 검증
 """
 from __future__ import annotations
 
+from speech_style import USER_DISPLAY_NAME
+
 import asyncio
 import gc
 import threading
@@ -159,7 +161,7 @@ def test_forecast_briefing_narrative():
     text = re.build_forecast_briefing("엔비디아", res["stress"], res["reweight"],
                                       base_pct=30, final_pct=20, macro_level="위험",
                                       high_vol_ticker="엔비디아")
-    assert "토니" in text and "MDD" in text and "%" in text
+    assert USER_DISPLAY_NAME in text and "MDD" in text and "%" in text
     assert "몬테카를로" in text
     print("✓ forecast_briefing:", text[:90], "...")
 

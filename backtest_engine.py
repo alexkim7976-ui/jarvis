@@ -13,8 +13,9 @@ stock_quant.py 의 14개 기술적 지표 계산 함수를 그대로 재사용�
 
 의존성: pip install yfinance pandas numpy matplotlib google-generativeai
 """
-
 from __future__ import annotations
+
+from speech_style import USER_DISPLAY_NAME
 
 import os
 import re
@@ -576,7 +577,7 @@ def build_report_payload(result: dict, chart_path: str | None,
     cur = result["cumulative_return"]
     excess = result["excess_return"]
     briefing = (
-        f"선생님께서 제안하신 전략의 3개년 백테스팅 결과, "
+        f"{USER_DISPLAY_NAME}께서 제안하신 전략의 3개년 백테스팅 결과, "
         f"누적 수익률은 {cur:+.2f}%이며 시장 대비 {excess:+.2f}% 초과 수익을 "
         f"{'달성했습니다' if excess >= 0 else '기록했습니다'}. "
         f"최대 낙폭은 {result['mdd']:.2f}%, 총 {result['total_trades']}회 거래되었습니다."

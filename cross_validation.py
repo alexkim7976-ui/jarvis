@@ -139,9 +139,13 @@ def _resolve_tickers(query: str) -> dict:
         code6 = yahoo_t.rsplit(".", 1)[0]
         out["kis"] = code6; out["ls"] = code6
         out["kiwoom"] = code6; out["dart"] = code6
+        out["naver"] = code6
     else:
         # 해외: NAS/NYS 자동 판별 어려움 → NAS 우선, 실패 시 NYS 재시도(매퍼 내부)
         out["kis_overseas"] = ("NAS", yahoo_t)
+        out["finnhub"] = yahoo_t
+    # Stooq(키 불필요)는 두 시장 모두 시도 — 야후식 티커 그대로
+    out["stooq"] = yahoo_t
     return out
 
 
@@ -237,12 +241,17 @@ def _map_fmp(symbol: str) -> StockData:
     out.market_cap = _safe_float(q.get("market_cap"))
     out.per = _safe_float(q.get("pe"))
     out.eps = _safe_float(q.get("eps"))
-    # PBR은 ratios-ttm 별도 호출
+    # PBR은 ratios-ttm 별도 호출 (stable/레거시 필드명 모두 대응)
     r = p.ratios_ttm(symbol)
     if r.get("success"):
         data = r.get("data")
         if isinstance(data, list) and data:
-            out.pbr = _safe_float(data[0].get("priceToBookRatioTTM"))
+            row = data[0]
+            out.pbr = _safe_float(
+                row.get("priceToBookRatioTTM")
+                or row.get("priceToBookRatio")
+                or row.get("pbRatioTTM")
+            )
     out.success = out.price is not None
     return out
 
@@ -355,6 +364,103 @@ def _map_dart(stock_code: str) -> StockData:
     return out
 
 
+def _map_naver(code: str) -> StockData:
+    """네이버 금융(키 불필요) — 한국 종목 현재가·PER/PBR/EPS/시총."""
+    p = get_provider("naver")
+    out = StockData(source="네이버 금융", ticker=code, currency="KRW", fetched_at=time.time())
+    if not p or not getattr(p, "enabled", False):
+        out.error = "네이버 프로바이더 없음"; return out
+    q = p.quote(code)
+    if not q.get("success"):
+        out.error = q.get("error"); return out
+    out.name = q.get("name")
+    out.price = _safe_float(q.get("price"))
+    out.change = _safe_float(q.get("change"))
+    out.change_pct = _safe_float(q.get("change_pct"))
+    out.open = _safe_float(q.get("open"))
+    out.high = _safe_float(q.get("high"))
+    out.low = _safe_float(q.get("low"))
+    out.volume = q.get("volume")
+    out.per = _safe_float(q.get("per"))
+    out.pbr = _safe_float(q.get("pbr"))
+    out.eps = _safe_float(q.get("eps"))
+    out.market_cap = _safe_float(q.get("market_cap"))
+    out.success = out.price is not None
+    return out
+
+
+def _map_daum(code: str) -> StockData:
+    """다음 금융(키 불필요) — 한국 종목 현재가·PER/PBR/EPS/시총."""
+    p = get_provider("daum")
+    out = StockData(source="다음 금융", ticker=code, currency="KRW", fetched_at=time.time())
+    if not p or not getattr(p, "enabled", False):
+        out.error = "다음 프로바이더 없음"; return out
+    q = p.quote(code)
+    if not q.get("success"):
+        out.error = q.get("error"); return out
+    out.name = q.get("name")
+    out.price = _safe_float(q.get("price"))
+    out.change = _safe_float(q.get("change"))
+    out.change_pct = _safe_float(q.get("change_pct"))
+    out.open = _safe_float(q.get("open"))
+    out.high = _safe_float(q.get("high"))
+    out.low = _safe_float(q.get("low"))
+    out.volume = q.get("volume")
+    out.per = _safe_float(q.get("per"))
+    out.pbr = _safe_float(q.get("pbr"))
+    out.eps = _safe_float(q.get("eps"))
+    out.market_cap = _safe_float(q.get("market_cap"))
+    out.success = out.price is not None
+    return out
+
+
+def _map_stooq(ticker: str) -> StockData:
+    """Stooq(키 불필요) — 글로벌 시세 CSV. 봇 차단 시 조용히 실패."""
+    p = get_provider("stooq")
+    out = StockData(source="Stooq", ticker=ticker, fetched_at=time.time())
+    if not p or not getattr(p, "enabled", False):
+        out.error = "Stooq 프로바이더 없음"; return out
+    q = p.quote(ticker)
+    if not q.get("success"):
+        out.error = q.get("error"); return out
+    out.price = _safe_float(q.get("price"))
+    out.open = _safe_float(q.get("open"))
+    out.high = _safe_float(q.get("high"))
+    out.low = _safe_float(q.get("low"))
+    out.volume = q.get("volume")
+    out.success = out.price is not None
+    return out
+
+
+def _map_finnhub(symbol: str) -> StockData:
+    """Finnhub(무료 키) — 글로벌 시세·펀더멘털."""
+    p = get_provider("finnhub")
+    out = StockData(source="Finnhub", ticker=symbol, fetched_at=time.time())
+    if not p or not getattr(p, "enabled", False):
+        out.error = "FINNHUB_API_KEY 미설정"; return out
+    # Finnhub 은 접미사(.KS 등) 없는 심볼 사용 — 해외 티커만 전달됨
+    q = p.quote(symbol)
+    if not q.get("success"):
+        out.error = q.get("error"); return out
+    out.price = _safe_float(q.get("price"))
+    out.change = _safe_float(q.get("change"))
+    out.change_pct = _safe_float(q.get("change_pct"))
+    out.open = _safe_float(q.get("open"))
+    out.high = _safe_float(q.get("high"))
+    out.low = _safe_float(q.get("low"))
+    if out.price:
+        m = p.metric(symbol)
+        if m.get("success"):
+            out.per = _safe_float(m.get("per"))
+            out.pbr = _safe_float(m.get("pbr"))
+            out.eps = _safe_float(m.get("eps"))
+            mc = _safe_float(m.get("market_cap"))
+            # Finnhub marketCapitalization 단위: 백만 → 원본 통화
+            out.market_cap = mc * 1e6 if mc else None
+    out.success = out.price is not None
+    return out
+
+
 # ══════════════════════════════════════════════════════════════
 #  병렬 페치 — ThreadPoolExecutor (각 매퍼는 동기 requests)
 # ══════════════════════════════════════════════════════════════
@@ -366,16 +472,21 @@ def fetch_all_parallel(query: str, timeout: float = 12.0) -> list[StockData]:
     tasks.append(("Yahoo Finance",          lambda yt=yt: _map_yahoo(yt)))
     tasks.append(("Alpha Vantage",          lambda yt=yt: _map_alpha(yt)))
     tasks.append(("Financial Modeling Prep",lambda yt=yt: _map_fmp(yt)))
+    tasks.append(("Stooq",                  lambda yt=yt: _map_stooq(yt)))
     if tk["_is_korean"]:
         c = tk["kis"]
         tasks.append(("한국투자증권", lambda c=c: _map_kis(c)))
         tasks.append(("LS증권",       lambda c=c: _map_ls(c)))
         tasks.append(("키움증권",     lambda c=c: _map_kiwoom(c)))
         tasks.append(("Open DART",    lambda c=c: _map_dart(c)))
+        tasks.append(("네이버 금융",  lambda c=c: _map_naver(c)))
+        tasks.append(("다음 금융",    lambda c=c: _map_daum(c)))
     else:
         exch, sym = tk["kis_overseas"]
         tasks.append(("한국투자증권(해외)",
                       lambda exch=exch, sym=sym: _map_kis_overseas(exch, sym)))
+        fh = tk.get("finnhub", yt)
+        tasks.append(("Finnhub", lambda fh=fh: _map_finnhub(fh)))
 
     results: list[StockData] = []
     with ThreadPoolExecutor(max_workers=len(tasks)) as ex:
@@ -407,8 +518,41 @@ def fetch_all_parallel(query: str, timeout: float = 12.0) -> list[StockData]:
 # ══════════════════════════════════════════════════════════════
 #  교차 검증 — 중앙값 기준 이상치 제외 후 합의
 # ══════════════════════════════════════════════════════════════
+# ── 소스 신뢰도 가중치 ──────────────────────────────────────────
+# 공식 거래소·브로커 실시간 피드 > 포털 준실시간 > 지연 애그리게이터.
+# 값이 갈릴 때 더 권위 있는 소스로 합의가 기울도록 가중평균에 사용.
+_SOURCE_WEIGHT = {
+    "KRX":               1.00,   # 한국거래소 공식
+    "한국투자증권":       1.00,   # 브로커 실시간(KRX 직결)
+    "한국투자증권(해외)":  0.95,
+    "LS증권":            1.00,
+    "키움증권":           1.00,
+    "Finnhub":           0.90,   # 미국 실시간(무료 티어)
+    "Financial Modeling Prep": 0.90,
+    "Alpha Vantage":     0.85,
+    "네이버 금융":        0.85,   # 포털 준실시간
+    "다음 금융":          0.85,
+    "Yahoo Finance":     0.70,   # 15분 지연 애그리게이터
+    "Stooq":             0.50,   # EOD 지연
+}
+_DEFAULT_WEIGHT = 0.60
+
+
+def _source_weight(source: str) -> float:
+    return _SOURCE_WEIGHT.get(source, _DEFAULT_WEIGHT)
+
+
+def _weighted_avg(pairs: list[tuple[str, float]]) -> float:
+    """신뢰도 가중평균. 가중합이 0이면 단순평균으로 폴백."""
+    wsum = sum(_source_weight(s) for s, _ in pairs)
+    if wsum <= 0:
+        return sum(v for _, v in pairs) / len(pairs)
+    return sum(_source_weight(s) * v for s, v in pairs) / wsum
+
+
 def _consensus(field_name: str, results: list[StockData], tol: float) -> FieldConsensus:
-    """field_name 값들을 모아 중앙값 기준 |편차| > tol 인 소스 제외 후 평균."""
+    """field_name 값들을 모아 중앙값 기준 |편차| > tol 소스를 걸러내고,
+    남은 값들의 '신뢰도 가중평균'을 합의값으로 채택."""
     pairs: list[tuple[str, float]] = []
     for r in results:
         if not r.success:
@@ -427,7 +571,7 @@ def _consensus(field_name: str, results: list[StockData], tol: float) -> FieldCo
     if not pairs:
         return FieldConsensus(None, [], [], "데이터 없음")
     if len(pairs) == 1:
-        return FieldConsensus(pairs[0][1], pairs, [], "단일 소스")
+        return FieldConsensus(pairs[0][1], pairs, [], "단일 소스(교차검증 불가 — 참고용)")
 
     nums = [v for _, v in pairs]
     med = statistics.median(nums)
@@ -439,11 +583,16 @@ def _consensus(field_name: str, results: list[StockData], tol: float) -> FieldCo
             (src, v) if dev <= tol else (src, v, dev)
         )
 
-    if not accepted:
-        return FieldConsensus(med, [], rejected, "전체 이상치 → 중앙값 채택")
-    final = sum(v for _, v in accepted) / len(accepted)
-    return FieldConsensus(final, accepted, rejected,
-                          f"{len(accepted)}/{len(pairs)} 합의")
+    if accepted:
+        final = _weighted_avg(accepted)
+        return FieldConsensus(final, accepted, rejected,
+                              f"{len(accepted)}/{len(pairs)} 합의(신뢰도 가중)")
+
+    # 모든 값이 중앙값에서 tol 초과 = '이상치'가 아니라 소스 간 산정기준 차이
+    # (주로 2개 소스 펀더멘털: 연결/별도, TTM/Forward). 신뢰도 가중으로 최선 추정.
+    dispersion = [(s, v, abs(v - med) / abs(med) if med != 0 else 0.0) for s, v in pairs]
+    return FieldConsensus(_weighted_avg(pairs), [], dispersion,
+                          "소스 간 산정기준 차이 → 신뢰도 가중 추정")
 
 
 def _merge_extras(results: list[StockData]) -> dict:
@@ -501,6 +650,29 @@ def _fmt_marketcap(v: float, currency: str) -> str:
     return f"${v:,.0f}"
 
 
+def price_confidence(report: ValidationReport) -> dict:
+    """가격 교차검증 신뢰도. 독립 소스 합의 개수·편차 기반.
+    반환: {level, score(0~100), n_agree, reason}."""
+    c = report.price
+    if c.final is None:
+        return {"level": "없음", "score": 0, "n_agree": 0, "reason": "가격 데이터 없음"}
+    n = len(c.accepted)
+    if n >= 4:
+        return {"level": "매우 높음", "score": 98, "n_agree": n,
+                "reason": f"{n}개 독립 소스가 1% 이내로 일치"}
+    if n == 3:
+        return {"level": "높음", "score": 92, "n_agree": n,
+                "reason": "3개 독립 소스가 1% 이내로 일치"}
+    if n == 2:
+        return {"level": "보통", "score": 74, "n_agree": n,
+                "reason": "2개 소스가 일치(교차검증 최소 수준)"}
+    if n == 1:
+        return {"level": "낮음", "score": 45, "n_agree": 1,
+                "reason": "단일 소스 — 교차검증 불가, 참고용"}
+    return {"level": "낮음", "score": 38, "n_agree": 0,
+            "reason": "소스 간 편차 커 가중 추정값"}
+
+
 def format_briefing(report: ValidationReport) -> str:
     """2~4문장 음성 브리핑. 사용자 요구 포맷:
     '[소스들] 등 총 N개 채널의 데이터를 교차 검증한 결과, ...주가는 ...이며...'"""
@@ -526,10 +698,14 @@ def format_briefing(report: ValidationReport) -> str:
     if report.price.final is not None:
         price_txt = f"현재 {nm}의 주가는 {_fmt_money(report.price.final, cur)}이며"
         rej_n = len(report.price.rejected)
-        if rej_n:
+        if rej_n and report.price.accepted:
             rej_srcs = ", ".join(s for s, _, _ in report.price.rejected)
             price_txt += f" ({rej_srcs}의 값은 편차가 커 제외)"
         parts.append(price_txt + ",")
+        # 신뢰도가 낮/보통이면 음성으로도 경고 (높음이면 소스 수가 이미 방증)
+        _conf = price_confidence(report)
+        if _conf["level"] in ("보통", "낮음"):
+            parts.append(f"다만 이 가격은 {_conf['reason']}이라 신뢰도는 {_conf['level']} 수준입니다.")
 
     # 등락
     if report.change_pct.final is not None:
@@ -561,6 +737,8 @@ def format_detail_report(report: ValidationReport) -> str:
     """HUD/로그용 다행 상세 리포트."""
     L = [f"━━━ 교차검증 리포트: {report.name or report.query} ━━━"]
     L.append(f"소스 {len(report.sources_succeeded)}/{len(report.sources_attempted)} 응답")
+    _conf = price_confidence(report)
+    L.append(f"가격 신뢰도: {_conf['level']} ({_conf['reason']})")
     for f in ("price", "change_pct", "volume", "per", "pbr", "market_cap", "eps"):
         c: FieldConsensus = getattr(report, f)
         if c.final is None:
@@ -569,8 +747,12 @@ def format_detail_report(report: ValidationReport) -> str:
         L.append(f"  {f:12} {c.final:>15,.4f}  ({c.method})")
         for src, v in c.accepted:
             L.append(f"      ✓ {src:25} {v:>15,.4f}")
+        # 채택이 하나도 없으면 '이상치'가 아니라 소스 간 산정기준 차이 → ≈ 로 표기
+        dispersion_only = not c.accepted
         for src, v, dev in c.rejected:
-            L.append(f"      ✗ {src:25} {v:>15,.4f}  (편차 {dev*100:.1f}%)")
+            mark = "≈" if dispersion_only else "✗"
+            note = "기준차" if dispersion_only else "편차"
+            L.append(f"      {mark} {src:25} {v:>15,.4f}  ({note} {dev*100:.1f}%)")
     if report.sources_failed:
         L.append("실패:")
         for src, err in report.sources_failed:
@@ -590,6 +772,7 @@ def report_to_dict(report: ValidationReport) -> dict:
         "sources_attempted": report.sources_attempted,
         "sources_succeeded": report.sources_succeeded,
         "sources_failed": [{"source": s, "error": e} for s, e in report.sources_failed],
+        "price_confidence": price_confidence(report),
         "price": cdict(report.price), "volume": cdict(report.volume),
         "change_pct": cdict(report.change_pct),
         "per": cdict(report.per), "pbr": cdict(report.pbr),
@@ -1182,11 +1365,12 @@ CROSSVAL_TOOLS = [
             "name": "analyze_stock_multi_source",
             "description": (
                 "사용자가 종목을 물으면(예: '삼성전자 알아봐줘', '테슬라 정보 줘') "
-                "Yahoo Finance, Alpha Vantage, Financial Modeling Prep, 한국투자증권, "
-                "LS증권, 키움증권, Open DART 등 다중 데이터 소스를 병렬 조회해 "
-                "주가/거래량/PER/PBR/시총 등의 값을 교차 검증한다. "
-                "응답의 'briefing' 필드는 검증 결과를 사용자에게 그대로 읽어줄 수 있는 "
-                "한국어 음성 문구이므로 가능하면 그 문장을 기반으로 답변하라."
+                "Yahoo Finance, Finnhub, Alpha Vantage, Financial Modeling Prep, "
+                "한국투자증권, 네이버 금융, 다음 금융, Open DART 등 다중 데이터 소스를 "
+                "병렬 조회해 주가/거래량/PER/PBR/시총을 소스 신뢰도 가중으로 교차 검증한다. "
+                "응답의 'briefing' 필드는 사용자에게 그대로 읽어줄 수 있는 한국어 음성 "
+                "문구이므로 가능하면 그 문장을 기반으로 답변하라. 응답의 'price_confidence' "
+                "(level/reason)가 '보통' 이하이면 답변에 신뢰도가 낮다는 점을 반드시 언급하라."
             ),
             "parameters": {
                 "type": "object",
@@ -1205,6 +1389,38 @@ CROSSVAL_TOOLS = [
 CROSSVAL_TOOL_NAMES = {t["function"]["name"] for t in CROSSVAL_TOOLS}
 
 
+def _fast_preliminary(query: str) -> dict:
+    """예비 답변 — 단일 실시간 시세(빠름) 또는 신선한 CV 캐시. 실패 시 success=False."""
+    # ① 신선한 교차검증 캐시(있으면 즉시)
+    try:
+        from cv_cache_manager import cv_cache_enabled, get_snapshot, is_snapshot_fresh
+        if cv_cache_enabled():
+            snap = get_snapshot(_resolve_yahoo_ticker(query))
+            if snap and is_snapshot_fresh(snap):
+                price = snap.get("consensus_price")
+                if price:
+                    nm = snap.get("name") or query
+                    b = (f"{nm} 최근 교차검증 합의가는 {price:,.0f} 정도예요. "
+                         f"방금 값으로 다시 교차검증하고 AI로 정밀하게 보고 있어요, 곧 정리해서 알려드릴게요.")
+                    return {"success": True, "briefing": b, "price": price,
+                            "currency": "", "preliminary": True, "name": nm}
+    except Exception:
+        pass
+    # ② 단일 실시간 시세(가장 빠른 소스)
+    try:
+        from stock_quant import get_stock_quote
+        qd = get_stock_quote(query)
+        if qd.get("success"):
+            b = (qd.get("briefing", "").strip()
+                 + " 지금 여러 무료 채널로 교차검증하고 AI로 정밀하게 보고 있어요, 곧 정리해서 알려드릴게요.")
+            return {"success": True, "briefing": b.strip(),
+                    "price": qd.get("price"), "currency": qd.get("currency", ""),
+                    "preliminary": True, "name": qd.get("name") or query}
+    except Exception:
+        pass
+    return {"success": False}
+
+
 def execute_crossval_tool(name: str, arguments) -> dict:
     if isinstance(arguments, str):
         import json
@@ -1213,12 +1429,24 @@ def execute_crossval_tool(name: str, arguments) -> dict:
         q = (arguments or {}).get("query", "").strip()
         if not q:
             return {"success": False, "message": "조회할 종목명을 알려주세요."}
+        # 2단계: 빠른 예비 답변을 먼저 돌려주고, 정밀 교차검증+AI 분석은 백그라운드에서
         try:
-            from hybrid_router import try_local_tool_execution, hybrid_routing_enabled
+            from cv_followup import two_phase_enabled, get_cv_followup
+            if two_phase_enabled():
+                prelim = _fast_preliminary(q)
+                if prelim.get("success"):
+                    get_cv_followup().start(
+                        q,
+                        preliminary_price=prelim.get("price"),
+                        currency=prelim.get("currency", ""),
+                    )
+                    return prelim
+        except Exception:
+            pass
+        try:
+            from hybrid_router import hybrid_routing_enabled
             if hybrid_routing_enabled():
-                local = try_local_tool_execution(name, arguments)
-                if local is not None:
-                    return local
+                pass  # analyze_stock_multi_source 는 cross_validation.analyze_stock 직행
         except ImportError:
             pass
         return analyze_stock(q)

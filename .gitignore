@@ -24,6 +24,7 @@ keystore.pass
 
 # JARVIS Link 자동발급 접속 토큰 (0600, 절대 커밋 금지)
 .jarvis_link_token
+zfold_bridge/termux_notify.sh
 
 # Google 서비스 계정 키 (Firestore)
 *serviceAccount*.json
@@ -73,3 +74,11 @@ target/
 
 # HUD 테스트 자동 생성 렌더 산출물 (test_dynamic_hud 가 매 실행마다 재생성)
 hud_dump/
+
+# TTS 헬퍼 컴파일 산출물 (jarvis_tts.swift → 바이너리, 소스에서 재생성)
+.tts_cache/
+bin/jarvis_tts
+
+# 출시 앱·DMG 빌드 산출물 (scripts/build_release_app.sh)
+dist/
+JARVIS.app/

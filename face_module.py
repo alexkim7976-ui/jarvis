@@ -1,6 +1,6 @@
-
-
 from __future__ import annotations
+
+from speech_style import USER_DISPLAY_NAME
 
 import os
 import json
@@ -161,7 +161,7 @@ class FaceRecognizer:
                     self.events.append({
                         "type": "warn",
                         "name": "Unknown",
-                        "message": "선생님, 등록되지 않은 인물이 감지되었습니다. 주의가 필요합니다.",
+                        "message": f"{USER_DISPLAY_NAME}, 등록되지 않은 인물이 감지되었습니다. 주의가 필요합니다.",
                     })
                     self._log("FACE", "⚠ 미등록 인물 감지")
             else:
@@ -176,7 +176,8 @@ class FaceRecognizer:
                     except Exception:
                         h = datetime.now().hour
                         greet = "좋은 아침입니다" if h < 12 else ("안녕하세요" if h < 18 else "좋은 저녁입니다")
-                    greeting = f"{greet}, {name} 선생님."
+                    display = USER_DISPLAY_NAME if name in ("Owner", "Boss", "태현", "김태현") else name
+                    greeting = f"{greet}, {display}."
                     self.events.append({
                         "type": "greet",
                         "name": name,
@@ -309,7 +310,7 @@ FACE_TOOLS = [
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "등록할 사람의 이름 (예: 태현, Owner, Boss)",
+                        "description": f"등록할 사람의 이름 (예: {USER_DISPLAY_NAME}, Owner, Boss)",
                     },
                 },
                 "required": ["name"],

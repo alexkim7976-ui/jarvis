@@ -7,6 +7,7 @@ Ollama Multi-Persona CoT 오케스트레이터 단위 테스트 — Gemini 0
 """
 from __future__ import annotations
 
+from speech_style import USER_DISPLAY_NAME
 import os
 import sys
 import tempfile
@@ -101,7 +102,7 @@ def test_orchestrator_prompt_synthesis():
     assert "종합 투자 매트릭스" in prompt
     assert "A리포트" in prompt
     assert "B리포트" in prompt
-    assert "선생님," in prompt
+    assert USER_DISPLAY_NAME in prompt
     assert "DCF적정주가" in compact or "DCF적정" in compact
     print("✓ Orchestrator synthesis prompt")
 
@@ -117,7 +118,7 @@ def test_three_stage_pipeline_mock():
             return "A: 기술 수렴·POC 지지·감성 골든크로스."
         if stage == "agent_b":
             return "B: DCF MoS 17% — A와 정합, 저평가."
-        return "선생님, NVDA는 기술·가치·심리 삼중 저평가 신호입니다."
+        return f"{USER_DISPLAY_NAME}, NVDA는 기술·가치·심리 삼중 저평가 신호입니다."
 
     set_ollama_stage_fn(mock_stage)
     try:
@@ -126,7 +127,7 @@ def test_three_stage_pipeline_mock():
         compact = build_compact_context(ctx)
         narrative, used, trace = run_multi_agent_cot(ctx, compact)
         assert used is True
-        assert narrative.startswith("선생님,")
+        assert narrative.startswith(f"{USER_DISPLAY_NAME},")
         assert calls == ["agent_a", "agent_b", "orchestrator"]
         assert "agent_a" in trace.get("stages", {})
         assert trace.get("gemini_called") is False
@@ -167,7 +168,9 @@ def test_ollama_failure_fallback_rule_based():
 
 
 def test_cache_multi_agent_narrative_gemini_zero():
-    from hybrid_router import try_local_tool_execution
+    # analyze_stock_multi_source 는 교차검증 전용(try_local_tool_execution → None)이므로
+    # 멀티에이전트 내러티브 캐싱은 실제 진입점인 refresh_local_analysis_report 로 검증한다.
+    from local_intelligence.engine import refresh_local_analysis_report
     from local_intelligence.report_cache import set_report_path_for_tests, read_store, clear_reports
     from local_intelligence.multi_agent import set_ollama_stage_fn
 
@@ -178,29 +181,36 @@ def test_cache_multi_agent_narrative_gemini_zero():
     set_ollama_stage_fn(lambda s, p: {
         "agent_a": "A기술",
         "agent_b": "B가치",
-        "orchestrator": "선생님, 멀티 에이전트 합의 브리핑입니다.",
+        "orchestrator": f"{USER_DISPLAY_NAME}, 멀티 에이전트 합의 브리핑입니다.",
     }.get(s, ""))
+
+    # 다른 테스트 모듈이 공유 os.environ 을 오염(LOCAL_INTEL_OLLAMA_ENABLED=0 등)시킬 수 있어
+    # 이 테스트에 필요한 값을 명시적으로 고정하고 종료 시 복원한다 (hermetic).
+    _saved = {k: os.environ.get(k) for k in ("LOCAL_INTEL_OLLAMA_ENABLED", "LOCAL_INTEL_MULTI_AGENT")}
+    os.environ["LOCAL_INTEL_OLLAMA_ENABLED"] = "1"
+    os.environ["LOCAL_INTEL_MULTI_AGENT"] = "1"
 
     with tempfile.TemporaryDirectory() as td:
         rp = Path(td) / "local_analysis_report.json"
         set_report_path_for_tests(rp)
         try:
             with patch("local_intelligence.engine.gather_fusion_context", return_value=mock_ctx):
-                result = try_local_tool_execution(
-                    "analyze_stock_multi_source", {"query": "NVDA"},
-                )
-            assert result is not None
-            assert result.get("gemini_called") is False
-            assert "멀티 에이전트" in result.get("briefing", "")
-            report = result.get("report") or {}
-            assert report.get("ollama_used") is True
-            assert report.get("multi_agent_trace")
+                rep = refresh_local_analysis_report("NVDA", force_ollama=True)
+            assert rep.ollama_used is True
+            assert rep.gemini_called is False
+            assert "멀티 에이전트" in rep.narrative
+            assert rep.multi_agent_trace
             store = read_store()
             assert "멀티 에이전트" in store["reports"]["NVDA"]["narrative"]
         finally:
             clear_reports()
             set_report_path_for_tests(None)
             set_ollama_stage_fn(None)
+            for k, v in _saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
     print("✓ cache narrative + multi_agent_trace, gemini 0")
 
 

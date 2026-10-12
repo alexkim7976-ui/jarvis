@@ -134,10 +134,12 @@ else
 fi
 
 # ── 6. 실행 스크립트 권한 ──
-chmod +x start.sh install.sh 2>/dev/null || true
+chmod +x start.sh install.sh jarvis.run 2>/dev/null || true
+chmod +x scripts/jarvis_launcher.sh scripts/install_jarvis_cli.sh 2>/dev/null || true
 chmod +x supply-chain-agent/run.sh 2>/dev/null || true
 [[ -f "Install JARVIS.command" ]] && chmod +x "Install JARVIS.command"
 [[ -f "Start JARVIS.command" ]] && chmod +x "Start JARVIS.command"
+[[ -f "Run JARVIS.command" ]] && chmod +x "Run JARVIS.command"
 
 # ── 7. macOS 더블클릭 런처 경로 기록 ──
 if [[ "$OS" == "Darwin" ]]; then
@@ -153,7 +155,10 @@ echo ""
 echo "  1) API 키 설정:  nano .env"
 echo "  2) 실행:"
 echo "       ./start.sh"
-echo "     또는 macOS:  'Start JARVIS.command' 더블클릭"
+echo "       ./jarvis.run          # Mac 런처(알림·중복 실행 방지)"
+echo "     또는 macOS:  'Start JARVIS.command' / 'Run JARVIS.command' 더블클릭"
+echo "  3) 터미널 어디서든 jarvis.run:"
+echo "       ./scripts/install_jarvis_cli.sh"
 echo ""
 echo "  (선택) Keychain 마이그레이션:  python3 secure_config.py --migrate"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"

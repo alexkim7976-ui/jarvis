@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# J.A.R.V.I.S — 터미널에서 `jarvis.run` 으로 실행 (이미 떠 있으면 포커스·깨우기)
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+export JARVIS_PROJECT_ROOT="$ROOT"
+exec /bin/bash "$ROOT/scripts/jarvis_launcher.sh" "$@"

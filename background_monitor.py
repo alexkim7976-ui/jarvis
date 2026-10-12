@@ -13,8 +13,9 @@ Google Play Console 리뷰/크래시, GitHub 이슈/PR을
 의존성:
   pip install google-play-scraper
 """
-
 from __future__ import annotations
+
+from speech_style import USER_DISPLAY_NAME
 
 import os
 import json
@@ -438,9 +439,9 @@ class BackgroundMonitor:
             num = evt.get("number", "")
 
             if etype == "issue":
-                return f"선생님, {repo} 저장소에 새 이슈가 등록되었습니다. #{num} '{title}', 작성자 {user}."
+                return f"{USER_DISPLAY_NAME}, {repo} 저장소에 새 이슈가 등록되었습니다. #{num} '{title}', 작성자 {user}."
             elif etype == "pr":
-                return f"선생님, {repo}에 새 풀 리퀘스트가 올라왔습니다. #{num} '{title}', 작성자 {user}."
+                return f"{USER_DISPLAY_NAME}, {repo}에 새 풀 리퀘스트가 올라왔습니다. #{num} '{title}', 작성자 {user}."
 
         elif source == "playstore":
             if etype == "review":
@@ -448,7 +449,7 @@ class BackgroundMonitor:
                 user = evt.get("user", "익명")
                 text = evt.get("text", "")[:30]
                 if score <= 2:
-                    return f"선생님, 주의가 필요합니다. {score}점 부정적 리뷰가 등록되었습니다. '{text}'"
+                    return f"{USER_DISPLAY_NAME}, 주의가 필요합니다. {score}점 부정적 리뷰가 등록되었습니다. '{text}'"
                 elif score >= 4:
                     return f"좋은 소식입니다. {score}점 리뷰가 등록되었습니다. {user}님이 '{text}'"
                 else:
@@ -457,7 +458,7 @@ class BackgroundMonitor:
                 rating = evt.get("rating", 0)
                 change = evt.get("change", "")
                 direction = evt.get("direction", "")
-                return f"선생님, 앱 평점이 {direction}하여 현재 {rating}점입니다. (변동: {change})"
+                return f"{USER_DISPLAY_NAME}, 앱 평점이 {direction}하여 현재 {rating}점입니다. (변동: {change})"
 
         return f"새 알림: {evt.get('type', 'unknown')}"
 

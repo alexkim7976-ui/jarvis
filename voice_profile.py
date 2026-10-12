@@ -16,7 +16,11 @@ J.A.R.V.I.S — 음성 프로필 & 학습 모듈
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import platform
+import uuid
 import time
 import wave
 import struct
@@ -28,12 +32,18 @@ from datetime import datetime
 import pyaudio
 
 # ──────────────────────────────────────────────
-#  설정
+#  설정 — 프로젝트 루트 기준 절대 경로 (앱/터미널 cwd 무관)
 # ──────────────────────────────────────────────
-VOICE_DIR = Path("voice_profile")
-VOICE_DIR.mkdir(exist_ok=True)
+_PROJECT_ROOT = Path(__file__).resolve().parent
+VOICE_DIR = Path(os.getenv("JARVIS_VOICE_PROFILE_DIR", str(_PROJECT_ROOT / "voice_profile")))
+VOICE_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    os.chmod(str(VOICE_DIR), 0o700)
+except OSError:
+    pass
 # 안전한 저장 포맷 — pickle 역직렬화 RCE 방지 위해 numpy npz 사용 (allow_pickle=False)
 PROFILE_FILE = VOICE_DIR / "profile.npz"
+_DEVICE_FILE = VOICE_DIR / "device.json"
 _LEGACY_PROFILE = VOICE_DIR / "profile.pkl"
 SAMPLES_DIR = VOICE_DIR / "samples"
 SAMPLES_DIR.mkdir(exist_ok=True)
@@ -57,6 +67,49 @@ N_MELS = 26
 def _log(msg):
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] 🎤 [음성학습] {msg}")
+
+
+def device_fingerprint() -> str:
+    """이 Mac 식별자 — 호스트명·아키텍처·MAC 기반 (민감정보 미포함)."""
+    raw = "|".join([
+        platform.node() or "",
+        platform.machine() or "",
+        str(uuid.getnode()),
+    ])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def is_known_device() -> bool:
+    """이 기기에서 과거에 음성 등록을 완료한 적이 있는지."""
+    if not _DEVICE_FILE.is_file():
+        return False
+    try:
+        data = json.loads(_DEVICE_FILE.read_text(encoding="utf-8"))
+        return data.get("device_id") == device_fingerprint()
+    except (OSError, json.JSONDecodeError, KeyError):
+        return False
+
+
+def mark_device_enrolled(*, sample_count: int = 0) -> None:
+    """음성 학습 완료 시 기기 등록 기록."""
+    payload = {
+        "device_id": device_fingerprint(),
+        "enrolled_at": datetime.now().isoformat(timespec="seconds"),
+        "sample_count": sample_count,
+        "profile": PROFILE_FILE.name,
+    }
+    _DEVICE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        os.chmod(str(_DEVICE_FILE), 0o600)
+    except OSError:
+        pass
+
+
+def voice_setup_required(profile: "VoiceProfile | None" = None) -> bool:
+    """5회 수집(V키)이 필요한지 — 학습 완료 또는 등록 기기 자동 복구면 False."""
+    if profile is None:
+        profile = VoiceProfile()
+    return not profile.trained
 
 
 # ──────────────────────────────────────────────
@@ -186,9 +239,33 @@ class VoiceProfile:
         self._collect_target = TARGET_SAMPLES
 
         self._load_profile()
+        if not self.trained:
+            self._try_retrain_from_samples()
+        if self.trained:
+            if not is_known_device():
+                mark_device_enrolled(sample_count=self._sample_count)
+                _log("등록 기기로 기록 — 이후 5회 수집 생략")
+        elif is_known_device():
+            _log("등록된 기기 — 저장 샘플에서 프로필 복구를 시도했으나 실패. V키로 재등록하세요.")
 
     def start_collection(self, target=TARGET_SAMPLES):
-        """샘플 수집 모드 시작"""
+        """샘플 수집 모드 시작 — 이미 학습됐으면 스킵."""
+        if self.trained:
+            return {
+                "success": True,
+                "message": f"이 기기는 이미 음성 등록됨 ({self._sample_count}샘플). 추가 등록 불필요.",
+                "remaining": 0,
+                "trained": True,
+                "skipped": True,
+            }
+        if is_known_device() and self._try_retrain_from_samples():
+            return {
+                "success": True,
+                "message": f"등록된 기기 — 저장된 샘플 {self._sample_count}개로 자동 복구 완료.",
+                "remaining": 0,
+                "trained": True,
+                "skipped": True,
+            }
         self.collecting = True
         self._collect_count = 0
         self._collect_target = target
@@ -317,8 +394,32 @@ class VoiceProfile:
         self._sample_count = len(self._templates)
         self.trained = True
         self._save_profile()
+        mark_device_enrolled(sample_count=self._sample_count)
 
         _log(f"학습 완료! 샘플={self._sample_count}, 임계값={self._threshold:.2f}")
+
+    def _try_retrain_from_samples(self) -> bool:
+        """voice_profile/samples/*.wav 에서 MFCC 재학습 — 등록 기기 재방문용."""
+        wavs = sorted(SAMPLES_DIR.glob("sample_*.wav"))
+        if len(wavs) < MIN_SAMPLES:
+            return False
+        templates = []
+        for wav_path in wavs:
+            try:
+                with wave.open(str(wav_path), "rb") as wf:
+                    frames = wf.readframes(wf.getnframes())
+                mfcc = extract_mfcc(frames)
+                if mfcc is not None:
+                    templates.append(mfcc)
+            except Exception:
+                continue
+        if len(templates) < MIN_SAMPLES:
+            return False
+        self._templates = templates
+        self._train()
+        if self.trained:
+            _log(f"저장 샘플에서 프로필 자동 복구 ({self._sample_count}개)")
+        return self.trained
 
     def _save_profile(self):
         """프로필 저장 (npz, allow_pickle 미사용)"""
@@ -351,7 +452,8 @@ class VoiceProfile:
                     self._sample_count = int(data["sample_count"])
                     self.trained = bool(data["trained"])
                 if self.trained:
-                    _log(f"프로필 로드: {self._sample_count}개 샘플, 임계값={self._threshold:.2f}")
+                    _log(f"프로필 로드: {self._sample_count}개 샘플, 임계값={self._threshold:.2f}"
+                         + (" (등록 기기)" if is_known_device() else ""))
             except Exception as e:
                 _log(f"프로필 로드 실패: {e}")
         elif _LEGACY_PROFILE.exists():
@@ -367,6 +469,8 @@ class VoiceProfile:
         # 파일 삭제
         if PROFILE_FILE.exists():
             PROFILE_FILE.unlink()
+        if _DEVICE_FILE.exists():
+            _DEVICE_FILE.unlink()
         for f in SAMPLES_DIR.glob("*.wav"):
             f.unlink()
         _log("프로필 초기화 완료")

@@ -51,6 +51,13 @@ def _parse_dt(date_str, time_str=None):
     return datetime.combine(d,datetime.min.time())
 
 def get_events(date="오늘",max_results=10):
+    if os.getenv("JARVIS_MAC_CALENDAR","1").strip().lower() not in ("0","false","off"):
+        try:
+            from mac_calendar import get_mac_events, mac_calendar_available
+            if mac_calendar_available():
+                r=get_mac_events(date=date,max_results=max_results)
+                if r.get("success"): return r
+        except Exception: pass
     svc=_get_service()
     if not svc: return _no_svc()
     try:
@@ -108,6 +115,13 @@ def delete_event(title,date="오늘"):
     except Exception as e: return {"success":False,"message":f"삭제오류:{e}"}
 
 def get_upcoming(hours=24,max_results=5):
+    if os.getenv("JARVIS_MAC_CALENDAR","1").strip().lower() not in ("0","false","off"):
+        try:
+            from mac_calendar import get_mac_upcoming, mac_calendar_available
+            if mac_calendar_available():
+                r=get_mac_upcoming(hours=hours,max_results=max_results)
+                if r.get("success"): return r
+        except Exception: pass
     svc=_get_service()
     if not svc: return _no_svc()
     try:

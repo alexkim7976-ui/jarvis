@@ -15,6 +15,7 @@ HYBRID_ROUTING_ENABLED=0 → 레거시 (호출부 분기).
 """
 from __future__ import annotations
 
+from speech_style import USER_DISPLAY_NAME
 import os
 import re
 from dataclasses import dataclass
@@ -71,11 +72,12 @@ LOCAL_TOOLS = frozenset({
     "check_upcoming_academic_schedule", "refresh_campus_agent_status",
     "register_face", "remove_face", "list_faces",
     # 주식 현재 정보·1차 분석 (로컬 인텔리전스)
-    "get_stock_quote", "get_stock_trend",
+    "get_stock_quote", "get_stock_trend", "verify_stock_indicators",
     "analyze_stock_investment", "analyze_stock_multi_source",
     "analyze_stock_news", "get_comprehensive_matrix_score",
     "check_watchlist_now", "compare_stocks_trend", "display_table",
     "fetch_whale_trades", "analyze_social_trends",
+    "analyze_tomorrow_stock",
     "get_macro_market_status",
 })
 
@@ -124,20 +126,42 @@ _LOCAL_TEXT_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"뉴스\s*감성|호재|악재|sentiment", re.I), "news_sentiment"),
     (re.compile(r"브리핑|종목\s*분석|주식\s*분석", re.I), "stock_brief"),
     (re.compile(r"고래|소셜|whale|reddit", re.I), "flow_social"),
+    (re.compile(r"내일\s*(주가|전망|시세)|CNN.*트위터|트위터.*CNN|내일\s*오를", re.I), "next_day_forecast"),
 ]
 
 _LOCAL_INTEL_TOOLS = frozenset({
-    "analyze_stock_multi_source", "analyze_stock_investment",
-    "analyze_stock_news", "get_comprehensive_matrix_score",
-    "check_watchlist_now", "get_stock_quote", "get_stock_trend",
+    # 전용 핸들러로 분기 — generic local_intelligence 로 덮어쓰지 않음
+})
+
+_STOCK_QUANT_LOCAL = frozenset({
+    "verify_stock_indicators", "get_stock_quote", "get_stock_trend",
+    "get_comprehensive_matrix_score", "analyze_stock_investment",
     "get_macro_market_status",
 })
+_NEWS_LOCAL = frozenset({"analyze_stock_news"})
+_FORECAST_LOCAL = frozenset({"analyze_tomorrow_stock"})
+_PRICE_ALERT_LOCAL = frozenset({"check_watchlist_now"})
 
 
 def hybrid_routing_enabled() -> bool:
     return os.getenv("HYBRID_ROUTING_ENABLED", "1").strip().lower() not in (
         "0", "false", "no", "off",
     )
+
+
+def no_gemini_mode() -> bool:
+    """Mac 로컬 AI 전용 — Gemini API 호출 금지."""
+    try:
+        from free_mode import free_only_enabled
+        if free_only_enabled():
+            return True
+    except ImportError:
+        pass
+    if os.getenv("JARVIS_NO_GEMINI", "0").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    if os.getenv("JARVIS_PREFER_LOCAL_LLM", "0").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    return os.getenv("LLM_PROVIDER", "").strip().lower() == "ollama"
 
 
 def set_router_logger(fn: Callable[[str, str], None] | None) -> None:
@@ -231,6 +255,8 @@ def route_request(
 ) -> RouteDecision:
     cls = classify_request(text, tool_name)
     if cls.tier == TaskTier.EXPERT_TASK:
+        if no_gemini_mode() and ollama_available:
+            return RouteDecision(tier=cls.tier, backend="ollama", classification=cls)
         return RouteDecision(tier=cls.tier, backend="gemini", classification=cls)
     if ollama_available:
         return RouteDecision(tier=cls.tier, backend="ollama", classification=cls)
@@ -241,8 +267,8 @@ def route_request(
 
 def try_local_tool_execution(tool_name: str, arguments: Any) -> dict | None:
     """
-    LOCAL 주식/합의 도구 — local_intelligence 경로 (Gemini 0).
-    EXPERT 도구 또는 hybrid 비활성 시 None → 기존 execute 경로.
+    LOCAL 주식/뉴스 도구 — 전용 핸들러로 정확한 분석 경로 보장 (Gemini 0).
+    analyze_stock_multi_source → None (cross_validation 전용).
     """
     if not hybrid_routing_enabled():
         return None
@@ -250,7 +276,9 @@ def try_local_tool_execution(tool_name: str, arguments: Any) -> dict | None:
     if classify_tool(tool_name).tier == TaskTier.EXPERT_TASK:
         return None
 
-    if tool_name not in _LOCAL_INTEL_TOOLS:
+    if tool_name not in (
+        _STOCK_QUANT_LOCAL | _NEWS_LOCAL | _FORECAST_LOCAL | _PRICE_ALERT_LOCAL | _LOCAL_INTEL_TOOLS
+    ):
         return None
 
     try:
@@ -260,15 +288,35 @@ def try_local_tool_execution(tool_name: str, arguments: Any) -> dict | None:
     except Exception:
         arguments = arguments or {}
 
-    query = (
-        (arguments or {}).get("query")
-        or (arguments or {}).get("ticker")
-        or ""
-    ).strip()
-    if not query:
-        return None
-
     try:
+        if tool_name in _STOCK_QUANT_LOCAL:
+            from stock_quant import execute_stock_tool
+            _log("OK", f"Local → stock_quant.{tool_name}")
+            return execute_stock_tool(tool_name, arguments)
+
+        if tool_name in _NEWS_LOCAL:
+            from news_analyzer import execute_news_tool
+            _log("OK", f"Local → news_analyzer.{tool_name}")
+            return execute_news_tool(tool_name, arguments)
+
+        if tool_name in _FORECAST_LOCAL:
+            from next_day_forecast import execute_forecast_tool
+            _log("OK", f"Local → next_day_forecast.{tool_name}")
+            return execute_forecast_tool(tool_name, arguments)
+
+        if tool_name in _PRICE_ALERT_LOCAL:
+            from price_alert import execute_price_alert_tool
+            _log("OK", f"Local → price_alert.{tool_name}")
+            return execute_price_alert_tool(tool_name, arguments)
+
+        query = (
+            (arguments or {}).get("query")
+            or (arguments or {}).get("ticker")
+            or ""
+        ).strip()
+        if not query:
+            return None
+
         from local_intelligence.engine import refresh_local_analysis_report, format_tool_response
         rep = refresh_local_analysis_report(query)
         _log("OK", f"Local Intelligence → {tool_name} ({query}) ollama={rep.ollama_used}")
@@ -276,7 +324,7 @@ def try_local_tool_execution(tool_name: str, arguments: Any) -> dict | None:
     except ImportError:
         return None
     except Exception as e:
-        _log("WARN", f"Local Intelligence 실패 ({tool_name}): {e}")
+        _log("WARN", f"Local tool 실패 ({tool_name}): {e}")
         return None
 
 
@@ -312,6 +360,9 @@ class HybridRoutingEngine:
             try:
                 return ollama_fn(text, history, pipeline)
             except Exception as e:
+                if no_gemini_mode():
+                    _log("WARN", f"Ollama 실패 (Gemini 차단): {e}")
+                    return f"죄송합니다, {USER_DISPLAY_NAME}. Mac 로컬 AI 처리에 실패했습니다."
                 _log("WARN", f"Ollama 실패 → Gemini 폴백: {e}")
                 _bump_gemini()
                 return gemini_fn(text, history, pipeline)
@@ -349,6 +400,8 @@ def ask_with_hybrid_routing(
     check_ollama: Callable[[], bool],
 ) -> str:
     if not hybrid_routing_enabled():
+        if no_gemini_mode():
+            return ollama_fn(text, history, pipeline)
         return gemini_fn(text, history, pipeline)
     return get_engine().ask(
         text, history, pipeline,
@@ -364,6 +417,7 @@ __all__ = [
     "RouteDecision",
     "HybridRoutingEngine",
     "hybrid_routing_enabled",
+    "no_gemini_mode",
     "classify_request",
     "classify_tool",
     "classify_text",

@@ -1,11 +1,11 @@
 """
 J.A.R.V.I.S — 통합 주식/공시 데이터 프로바이더
 ────────────────────────────────────────────────
-한 곳에서 7개 데이터 소스를 캡슐화한다.
+한 곳에서 10개 데이터 소스를 캡슐화한다.
 
-  ▸ AlphaVantageProvider   ALPHAVANTAGE_API_KEY
+  ▸ AlphaVantageProvider   ALPHAVANTAGE_API_KEY (무료 티어)
   ▸ YahooFinanceProvider   (키 불필요 — yfinance 사용)
-  ▸ FMPProvider            FMP_API_KEY (Financial Modeling Prep)
+  ▸ FMPProvider            FMP_API_KEY (Financial Modeling Prep, 무료 티어)
   ▸ KISProvider            KIS_APP_KEY / KIS_APP_SECRET / KIS_ENV(real|virtual)
                            한국투자증권 OpenAPI — REST
   ▸ LSProvider             LS_APP_KEY / LS_APP_SECRET
@@ -14,7 +14,10 @@ J.A.R.V.I.S — 통합 주식/공시 데이터 프로바이더
                            키움증권 Next API — REST
                            ※ 레거시 영웅문 Open API+(ActiveX/COM)은 Windows 전용이라
                              macOS에서 동작 불가 → Next API(REST)만 지원.
-  ▸ DARTProvider           DART_API_KEY (금감원 OpenDART)
+  ▸ DARTProvider           DART_API_KEY (금감원 OpenDART, 무료)
+  ▸ StooqProvider          (키 불필요 — 글로벌 시세 CSV)
+  ▸ NaverProvider          (키 불필요 — 한국 시세·PER/PBR/EPS)
+  ▸ FinnhubProvider        FINNHUB_API_KEY (무료 티어 60req/분)
 
 설계 원칙
   · 키 누락 시 enabled=False 로 깔끔히 비활성 (예외 X)
@@ -29,9 +32,12 @@ import io
 import re
 import time
 import json
+import hashlib
 import threading
 import zipfile
 from datetime import datetime, timedelta
+
+HTTP_TIMEOUT = 10
 
 # 보안: stdlib xml.etree는 billion-laughs(엔티티 폭발)에 취약. defusedxml로 대체.
 try:
@@ -41,7 +47,22 @@ except ImportError:
     from xml.etree import ElementTree as ET    # 폴백 — 경고는 _load_corp_codes 호출 시
     _XML_HARDENED = False
 
-import requests
+try:
+    import net as _net
+    def _http_get(url, **kwargs):
+        kwargs.setdefault("timeout", HTTP_TIMEOUT)
+        return _net.get(url, **kwargs)
+    def _http_post(url, **kwargs):
+        kwargs.setdefault("timeout", HTTP_TIMEOUT)
+        return _net.post(url, **kwargs)
+except ImportError:
+    import requests as _requests
+    def _http_get(url, **kwargs):
+        kwargs.setdefault("timeout", HTTP_TIMEOUT)
+        return __http_get(url, **kwargs)
+    def _http_post(url, **kwargs):
+        kwargs.setdefault("timeout", HTTP_TIMEOUT)
+        return __http_post(url, **kwargs)
 
 try:
     from dotenv import load_dotenv
@@ -54,9 +75,6 @@ try:
 except Exception:
     def _get_secret(key, default=""):
         return os.environ.get(key, default)
-
-
-HTTP_TIMEOUT = 10
 
 
 def _log(provider: str, msg: str):
@@ -120,7 +138,7 @@ class AlphaVantageProvider:
             return _err("ALPHAVANTAGE_API_KEY 미설정")
         params["apikey"] = self.key
         try:
-            r = requests.get(self.BASE, params=params, timeout=HTTP_TIMEOUT)
+            r = _http_get(self.BASE, params=params, timeout=HTTP_TIMEOUT)
             r.raise_for_status()
             d = r.json()
             if "Note" in d:           # rate limit
@@ -230,7 +248,9 @@ class YahooFinanceProvider:
 #  Financial Modeling Prep — 미국 중심 펀더멘털·재무제표
 # ══════════════════════════════════════════════════════════════
 class FMPProvider:
-    BASE = "https://financialmodelingprep.com/api/v3"
+    # FMP는 레거시 /api/v3(경로형 심볼)를 폐기하고 /stable(쿼리 파라미터 심볼)로 통합.
+    # 신규 무료 키는 v3에서 403을 반환하므로 stable 엔드포인트를 사용한다.
+    BASE = "https://financialmodelingprep.com/stable"
 
     def __init__(self):
         self.key = _get_secret("FMP_API_KEY")
@@ -241,11 +261,11 @@ class FMPProvider:
             return _err("FMP_API_KEY 미설정")
         params["apikey"] = self.key
         try:
-            r = requests.get(f"{self.BASE}{path}", params=params, timeout=HTTP_TIMEOUT)
+            r = _http_get(f"{self.BASE}{path}", params=params, timeout=HTTP_TIMEOUT)
             r.raise_for_status()
             d = r.json()
-            if isinstance(d, dict) and d.get("Error Message"):
-                return _err(d["Error Message"])
+            if isinstance(d, dict) and (d.get("Error Message") or d.get("error")):
+                return _err(d.get("Error Message") or d.get("error"))
             return {"success": True, "data": d}
         except Exception as e:
             return _err(str(e))
@@ -253,7 +273,7 @@ class FMPProvider:
     def quote(self, symbol: str) -> dict:
         if not _valid_ticker(symbol):
             return _err(f"잘못된 종목 심볼: {symbol!r}")
-        r = self._get(f"/quote/{symbol}")
+        r = self._get("/quote", symbol=symbol)
         if not r["success"]:
             return r
         rows = r["data"] or []
@@ -262,50 +282,105 @@ class FMPProvider:
         q = rows[0]
         return {"success": True, "symbol": q.get("symbol"), "name": q.get("name"),
                 "price": q.get("price"), "change": q.get("change"),
-                "change_pct": q.get("changesPercentage"),
+                # stable: changePercentage / 레거시: changesPercentage 둘 다 대응
+                "change_pct": q.get("changePercentage", q.get("changesPercentage")),
                 "volume": q.get("volume"), "market_cap": q.get("marketCap"),
                 "pe": q.get("pe"), "eps": q.get("eps"), "raw": q}
 
     def profile(self, symbol: str) -> dict:
         if not _valid_ticker(symbol):
             return _err(f"잘못된 종목 심볼: {symbol!r}")
-        return self._get(f"/profile/{symbol}")
+        return self._get("/profile", symbol=symbol)
 
     def income(self, symbol: str, limit: int = 4) -> dict:
         if not _valid_ticker(symbol):
             return _err(f"잘못된 종목 심볼: {symbol!r}")
-        return self._get(f"/income-statement/{symbol}", limit=limit)
+        return self._get("/income-statement", symbol=symbol, limit=limit)
 
     def balance(self, symbol: str, limit: int = 4) -> dict:
         if not _valid_ticker(symbol):
             return _err(f"잘못된 종목 심볼: {symbol!r}")
-        return self._get(f"/balance-sheet-statement/{symbol}", limit=limit)
+        return self._get("/balance-sheet-statement", symbol=symbol, limit=limit)
 
     def cash_flow(self, symbol: str, limit: int = 4) -> dict:
         if not _valid_ticker(symbol):
             return _err(f"잘못된 종목 심볼: {symbol!r}")
-        return self._get(f"/cash-flow-statement/{symbol}", limit=limit)
+        return self._get("/cash-flow-statement", symbol=symbol, limit=limit)
 
     def ratios_ttm(self, symbol: str) -> dict:
         if not _valid_ticker(symbol):
             return _err(f"잘못된 종목 심볼: {symbol!r}")
-        return self._get(f"/ratios-ttm/{symbol}")
+        return self._get("/ratios-ttm", symbol=symbol)
 
     def search(self, query: str, limit: int = 10) -> dict:
-        return self._get("/search", query=query, limit=limit)
+        return self._get("/search-symbol", query=query, limit=limit)
 
 
 # ══════════════════════════════════════════════════════════════
 #  공통: OAuth2 토큰 캐시 베이스
 # ══════════════════════════════════════════════════════════════
 class _TokenCached:
+    """OAuth2 액세스 토큰 캐시 (인메모리 + 디스크).
+
+    KIS·LS 등은 토큰 발급 자체에 레이트리밋(예: KIS 1분 1회)이 걸려 있어,
+    프로세스가 재시작될 때마다 새 토큰을 요청하면 403(EGW00133)이 난다.
+    24시간 유효한 토큰을 디스크에 캐시해 프로세스 간 재사용한다.
+    파일명은 앱키 해시라서 원문 키는 절대 노출되지 않는다.
+    """
+
+    _CACHE_DIR = os.path.join(
+        os.environ.get("JARVIS_TOKEN_DIR") or os.path.expanduser("~/.jarvis/tokens")
+    )
+
     def __init__(self):
         self._token = None
         self._token_exp = 0.0
         self._lock = threading.Lock()
+        self._cache_tag: str | None = None   # 하위 클래스가 앱키 해시로 설정
 
     def _token_valid(self) -> bool:
         return bool(self._token) and time.time() < self._token_exp - 60
+
+    @staticmethod
+    def _tag_for(prefix: str, *parts: str) -> str:
+        """앱키 등 민감정보를 해시해 캐시 파일 태그 생성 (원문 미노출)."""
+        raw = "|".join(p or "" for p in parts).encode("utf-8")
+        return f"{prefix}_{hashlib.sha256(raw).hexdigest()[:16]}"
+
+    def _cache_file(self) -> str | None:
+        if not self._cache_tag:
+            return None
+        try:
+            os.makedirs(self._CACHE_DIR, mode=0o700, exist_ok=True)
+        except Exception:
+            return None
+        return os.path.join(self._CACHE_DIR, f"{self._cache_tag}.json")
+
+    def _load_disk_token(self) -> bool:
+        path = self._cache_file()
+        if not path or not os.path.exists(path):
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            tok, exp = d.get("token"), float(d.get("exp", 0))
+            if tok and time.time() < exp - 60:
+                self._token, self._token_exp = tok, exp
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _save_disk_token(self) -> None:
+        path = self._cache_file()
+        if not path or not self._token:
+            return
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump({"token": self._token, "exp": self._token_exp}, f)
+        except Exception:
+            pass
 
 
 # ══════════════════════════════════════════════════════════════
@@ -324,21 +399,48 @@ class KISProvider(_TokenCached):
         self.base = ("https://openapivts.koreainvestment.com:29443" if self.is_virtual
                      else "https://openapi.koreainvestment.com:9443")
         self.enabled = bool(self.app_key and self.app_secret)
+        # 토큰 디스크 캐시 태그: 앱키+환경별로 분리 (원문 키는 해시라 미노출)
+        self._cache_tag = self._tag_for(
+            "kis_vts" if self.is_virtual else "kis_real", self.app_key or "")
 
     def _get_token(self) -> str:
         with self._lock:
             if self._token_valid():
                 return self._token
-            r = requests.post(f"{self.base}/oauth2/tokenP",
+            if self._load_disk_token():
+                return self._token
+            r = _http_post(f"{self.base}/oauth2/tokenP",
                               json={"grant_type": "client_credentials",
                                     "appkey": self.app_key,
                                     "appsecret": self.app_secret},
                               timeout=HTTP_TIMEOUT)
-            r.raise_for_status()
+            if r.status_code != 200:
+                # KIS는 실패 사유를 JSON 본문(error_code/error_description)에 담아줌.
+                # raise_for_status()의 맨 403 대신 실제 사유를 노출한다.
+                body = {}
+                try:
+                    body = r.json()
+                except Exception:
+                    pass
+                code = body.get("error_code") or body.get("msg_cd") or f"HTTP {r.status_code}"
+                desc = (body.get("error_description") or body.get("msg1")
+                        or _redact(r.text[:200]) or "사유 미상")
+                hint = ""
+                if str(code) == "EGW00133":
+                    hint = " (토큰 발급 1분 1회 제한 — 잠시 후 자동 해소)"
+                elif str(code) in ("EGW00121", "EGW00201"):
+                    env_now = "모의" if self.is_virtual else "실전"
+                    hint = (f" (현재 '{env_now}' 환경으로 요청 중 — 키가 반대 환경용이면 "
+                            f"KIS_ENV를 바꿔야 함)")
+                raise RuntimeError(f"KIS 토큰발급 실패 [{code}] {desc}{hint}")
             d = r.json()
-            self._token = d["access_token"]
+            tok = d.get("access_token")
+            if not tok:
+                raise RuntimeError(f"KIS 토큰 응답에 access_token 없음: {_redact(str(d)[:200])}")
+            self._token = tok
             self._token_exp = time.time() + int(d.get("expires_in", 86400))
-            _log("KIS", f"토큰 발급 ({'모의' if self.is_virtual else '실전'})")
+            self._save_disk_token()
+            _log("KIS", f"토큰 발급 ({'모의' if self.is_virtual else '실전'}, 24h 캐시)")
             return self._token
 
     def _headers(self, tr_id: str) -> dict:
@@ -355,7 +457,7 @@ class KISProvider(_TokenCached):
         if not _valid_kr_code(code):
             return _err(f"잘못된 종목코드: {code!r}")
         try:
-            r = requests.get(
+            r = _http_get(
                 f"{self.base}/uapi/domestic-stock/v1/quotations/inquire-price",
                 headers=self._headers("FHKST01010100"),
                 params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code},
@@ -389,7 +491,7 @@ class KISProvider(_TokenCached):
             today = datetime.now()
             start = (today - timedelta(days=days * 2)).strftime("%Y%m%d")  # 주말/공휴일 보정
             end = today.strftime("%Y%m%d")
-            r = requests.get(
+            r = _http_get(
                 f"{self.base}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
                 headers=self._headers("FHKST03010100"),
                 params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code,
@@ -414,7 +516,7 @@ class KISProvider(_TokenCached):
         if not _valid_ticker(symbol):
             return _err(f"잘못된 종목 심볼: {symbol!r}")
         try:
-            r = requests.get(
+            r = _http_get(
                 f"{self.base}/uapi/overseas-price/v1/quotations/price",
                 headers=self._headers("HHDFS00000300"),
                 params={"AUTH": "", "EXCD": exch, "SYMB": symbol},
@@ -451,7 +553,7 @@ class LSProvider(_TokenCached):
         with self._lock:
             if self._token_valid():
                 return self._token
-            r = requests.post(
+            r = _http_post(
                 f"{self.BASE}/oauth2/token",
                 data={"grant_type": "client_credentials",
                       "appkey": self.app_key,
@@ -471,7 +573,7 @@ class LSProvider(_TokenCached):
         if not self.enabled:
             return _err("LS_APP_KEY/SECRET 미설정")
         try:
-            r = requests.post(
+            r = _http_post(
                 f"{self.BASE}{tr_path}",
                 headers={"content-type": "application/json; charset=utf-8",
                          "authorization": f"Bearer {self._get_token()}",
@@ -539,7 +641,7 @@ class KiwoomProvider(_TokenCached):
         with self._lock:
             if self._token_valid():
                 return self._token
-            r = requests.post(
+            r = _http_post(
                 f"{self.base}/oauth2/token",
                 json={"grant_type": "client_credentials",
                       "appkey": self.app_key, "secretkey": self.app_secret},
@@ -558,7 +660,7 @@ class KiwoomProvider(_TokenCached):
         if not self.enabled:
             return _err("KIWOOM_APP_KEY/SECRET 미설정")
         try:
-            r = requests.post(
+            r = _http_post(
                 f"{self.base}{path}",
                 headers={"Content-Type": "application/json;charset=UTF-8",
                          "authorization": f"Bearer {self._get_token()}",
@@ -619,7 +721,7 @@ class DARTProvider:
             return _err("DART_API_KEY 미설정")
         params["crtfc_key"] = self.key
         try:
-            r = requests.get(f"{self.BASE}{path}", params=params, timeout=15)
+            r = _http_get(f"{self.BASE}{path}", params=params, timeout=15)
             r.raise_for_status()
             d = r.json()
             # 000=정상, 013=조회결과없음 (실패 아님), 그 외 오류
@@ -682,7 +784,7 @@ class DARTProvider:
             MAX_DOWNLOAD = 50 * 1024 * 1024   # 50MB — corpCode.zip 실제 크기 ~5MB
             MAX_UNCOMPRESSED = 200 * 1024 * 1024  # 200MB — 해제 후 corpCode.xml ~30MB
             try:
-                r = requests.get(f"{self.BASE}/corpCode.xml",
+                r = _http_get(f"{self.BASE}/corpCode.xml",
                                  params={"crtfc_key": self.key},
                                  timeout=30, stream=True)
                 r.raise_for_status()
@@ -752,6 +854,313 @@ class DARTProvider:
 
 
 # ══════════════════════════════════════════════════════════════
+#  Stooq — 키 불필요(keyless) 글로벌 시세 CSV
+#  https://stooq.com — 미국/유럽/지수/FX 시세를 CSV로 무료 제공.
+#  한국 개별종목 커버리지는 불안정 → 글로벌(미국) 위주로 사용.
+# ══════════════════════════════════════════════════════════════
+class StooqProvider:
+    QUOTE = "https://stooq.com/q/l/"
+    HIST = "https://stooq.com/q/d/l/"
+
+    def __init__(self):
+        self.enabled = True   # 키 불필요
+        # Stooq는 UA 없는/데이터센터 요청을 차단하는 경향 → 브라우저 UA 부여
+        self._headers = {
+            "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/124.0 Safari/537.36"),
+            "Accept": "text/csv,text/plain,*/*",
+        }
+
+    @staticmethod
+    def _to_symbol(ticker: str) -> str:
+        """야후식 티커 → Stooq 심볼. 미국주는 소문자 + .us."""
+        t = (ticker or "").strip().lower()
+        if not t:
+            return t
+        if t.endswith(".ks") or t.endswith(".kq"):
+            # Stooq 한국 심볼: 6자리 + .kr (커버리지 제한적)
+            return t.split(".")[0] + ".kr"
+        if "." in t or "^" in t or "-" in t:
+            return t
+        return t + ".us"
+
+    @staticmethod
+    def _looks_like_block(text: str) -> bool:
+        """CSV 대신 HTML(차단/404 안내 페이지)이 오면 True."""
+        head = (text or "")[:200].lstrip().lower()
+        return (head.startswith("<") or "<title>stooq" in head
+                or "does not exist" in head or "exceeded" in head)
+
+    def quote(self, ticker: str) -> dict:
+        sym = self._to_symbol(ticker)
+        if not sym:
+            return _err("빈 심볼")
+        try:
+            r = _http_get(self.QUOTE, params={"s": sym, "f": "sd2t2ohlcv", "h": "", "e": "csv"},
+                          headers=self._headers, timeout=HTTP_TIMEOUT)
+            text = (r.text or "").strip()
+            # 차단/404은 HTML을 반환 → raise_for_status()의 맨 404 대신 깔끔히 처리
+            if r.status_code >= 400 or self._looks_like_block(text):
+                return _err(f"Stooq 미제공/차단({sym}) — IP 제한 또는 미커버 종목")
+            lines = text.splitlines()
+            if len(lines) < 2:
+                return _err("Stooq 응답 비어있음")
+            cols = [c.strip().lower() for c in lines[0].split(",")]
+            vals = lines[1].split(",")
+            row = dict(zip(cols, vals))
+            close = row.get("close", "")
+            if not close or close.upper() in ("N/D", "ND", ""):
+                return _err("Stooq 데이터 없음")
+            def _f(k):
+                try:
+                    return float(row.get(k) or 0) or None
+                except (TypeError, ValueError):
+                    return None
+            price = _f("close")
+            if not price:
+                return _err("Stooq 가격 없음")
+            vol = None
+            try:
+                vol = int(float(row.get("volume") or 0)) or None
+            except (TypeError, ValueError):
+                vol = None
+            return {"success": True, "symbol": sym, "price": price,
+                    "open": _f("open"), "high": _f("high"), "low": _f("low"),
+                    "volume": vol, "raw": row}
+        except Exception as e:
+            return _err(str(e))
+
+    def daily(self, ticker: str) -> dict:
+        """일봉 CSV (Date,Open,High,Low,Close,Volume)."""
+        sym = self._to_symbol(ticker)
+        try:
+            r = _http_get(self.HIST, params={"s": sym, "i": "d"},
+                          headers=self._headers, timeout=HTTP_TIMEOUT)
+            text = (r.text or "").strip()
+            if r.status_code >= 400 or self._looks_like_block(text):
+                return _err(f"Stooq 미제공/차단({sym}) — IP 제한 또는 미커버 종목")
+            lines = text.splitlines()
+            if len(lines) < 2 or "N/D" in text[:64]:
+                return _err("Stooq 일봉 없음")
+            cols = [c.strip() for c in lines[0].split(",")]
+            rows = []
+            for ln in lines[1:]:
+                parts = ln.split(",")
+                if len(parts) != len(cols):
+                    continue
+                rows.append(dict(zip(cols, parts)))
+            return {"success": True, "symbol": sym, "count": len(rows), "rows": rows}
+        except Exception as e:
+            return _err(str(e))
+
+
+# ══════════════════════════════════════════════════════════════
+#  네이버 금융 — 키 불필요(keyless) 한국 시세·펀더멘털
+#  m.stock.naver.com integration API: 현재가 + PER/PBR/EPS/시총 한 번에.
+# ══════════════════════════════════════════════════════════════
+class NaverProvider:
+    INTEGRATION = "https://m.stock.naver.com/api/stock/{code}/integration"
+    BASIC = "https://m.stock.naver.com/api/stock/{code}/basic"
+
+    def __init__(self):
+        self.enabled = True   # 키 불필요
+        self._headers = {
+            "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/124.0 Safari/537.36"),
+            "Referer": "https://m.stock.naver.com/",
+        }
+
+    @staticmethod
+    def _num(v):
+        """'25.02배' '12,372원' '8.22' '46.76%' → float (첫 수치 토큰)."""
+        if v is None:
+            return None
+        m = re.search(r"-?[\d,]+(?:\.\d+)?", str(v))
+        if not m:
+            return None
+        try:
+            f = float(m.group(0).replace(",", ""))
+            return f if f != 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _market_won(v):
+        """'1,809조 4,232억' → 원 단위 float."""
+        if v is None:
+            return None
+        s = str(v)
+        total = 0.0
+        jo = re.search(r"([\d,]+)\s*조", s)
+        eok = re.search(r"([\d,]+)\s*억", s)
+        if jo:
+            total += float(jo.group(1).replace(",", "")) * 1e12
+        if eok:
+            total += float(eok.group(1).replace(",", "")) * 1e8
+        if total == 0.0:
+            # 단위 없는 순수 숫자면 억 단위로 간주
+            n = NaverProvider._num(s)
+            return n * 1e8 if n else None
+        return total
+
+    def quote(self, code: str) -> dict:
+        if not _valid_kr_code(code):
+            return _err(f"잘못된 한국 종목코드: {code!r}")
+        try:
+            # ① /basic — 현재가·등락 (현재가는 여기 closePrice)
+            b = _http_get(self.BASIC.format(code=code), headers=self._headers,
+                          timeout=HTTP_TIMEOUT)
+            b.raise_for_status()
+            basic = b.json() or {}
+            name = basic.get("stockName")
+            price = self._num(basic.get("closePrice"))
+            change = self._num(basic.get("compareToPreviousClosePrice"))
+            change_pct = self._num(basic.get("fluctuationsRatio"))
+            if price is None:
+                return _err("네이버 가격 없음")
+
+            # ② /integration — OHLCV·PER/PBR/EPS/시총
+            per = pbr = eps = market_cap = None
+            openp = high = low = volume = None
+            try:
+                ig = _http_get(self.INTEGRATION.format(code=code),
+                               headers=self._headers, timeout=HTTP_TIMEOUT)
+                if ig.status_code == 200:
+                    infos = {it.get("code"): it.get("value")
+                             for it in (ig.json() or {}).get("totalInfos", [])}
+                    per = self._num(infos.get("per"))
+                    pbr = self._num(infos.get("pbr"))
+                    eps = self._num(infos.get("eps"))
+                    market_cap = self._market_won(infos.get("marketValue"))
+                    openp = self._num(infos.get("openPrice"))
+                    high = self._num(infos.get("highPrice"))
+                    low = self._num(infos.get("lowPrice"))
+                    volume = self._num(infos.get("accumulatedTradingVolume"))
+            except Exception:
+                pass
+
+            return {"success": True, "code": code, "name": name, "price": price,
+                    "change": change, "change_pct": change_pct,
+                    "open": openp, "high": high, "low": low,
+                    "volume": int(volume) if volume else None,
+                    "per": per, "pbr": pbr, "eps": eps, "market_cap": market_cap,
+                    "currency": "KRW"}
+        except Exception as e:
+            return _err(str(e))
+
+
+# ══════════════════════════════════════════════════════════════
+#  다음 금융 — 키 불필요(keyless) 한국 시세·펀더멘털
+#  finance.daum.net/api/quotes/A{code}: 현재가 + PER/PBR/EPS/시총 한 번에.
+# ══════════════════════════════════════════════════════════════
+class DaumProvider:
+    QUOTE = "https://finance.daum.net/api/quotes/A{code}"
+
+    def __init__(self):
+        self.enabled = True   # 키 불필요
+        self._headers = {
+            "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/124.0 Safari/537.36"),
+            "Referer": "https://finance.daum.net/",
+        }
+
+    @staticmethod
+    def _f(v):
+        try:
+            f = float(v)
+            return f if f != 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    def quote(self, code: str) -> dict:
+        if not _valid_kr_code(code):
+            return _err(f"잘못된 한국 종목코드: {code!r}")
+        try:
+            hdr = dict(self._headers)
+            hdr["Referer"] = f"https://finance.daum.net/quotes/A{code}"
+            r = _http_get(self.QUOTE.format(code=code), headers=hdr, timeout=HTTP_TIMEOUT)
+            if r.status_code != 200:
+                return _err(f"다음 금융 응답 오류 (HTTP {r.status_code})")
+            d = r.json() or {}
+            price = self._f(d.get("tradePrice"))
+            if price is None:
+                return _err("다음 금융 가격 없음")
+            # 등락: changePrice/changeRate는 절대값, change(RISE/FALL)로 부호 결정
+            sign = -1.0 if str(d.get("change")).upper() == "FALL" else 1.0
+            chg = self._f(d.get("changePrice"))
+            change = abs(chg) * sign if chg is not None else None
+            rate = self._f(d.get("changeRate"))
+            change_pct = abs(rate) * 100.0 * sign if rate is not None else None
+            vol = d.get("accTradeVolume")
+            return {"success": True, "code": code, "name": d.get("name"),
+                    "price": price, "change": change, "change_pct": change_pct,
+                    "open": self._f(d.get("openingPrice")),
+                    "high": self._f(d.get("highPrice")),
+                    "low": self._f(d.get("lowPrice")),
+                    "volume": int(float(vol)) if vol else None,
+                    "per": self._f(d.get("per")), "pbr": self._f(d.get("pbr")),
+                    "eps": self._f(d.get("eps")),
+                    "market_cap": self._f(d.get("marketCap")),
+                    "currency": "KRW", "raw": d}
+        except Exception as e:
+            return _err(str(e))
+
+
+# ══════════════════════════════════════════════════════════════
+#  Finnhub — 무료 티어(키 필요, 60req/분) 글로벌 시세·펀더멘털
+# ══════════════════════════════════════════════════════════════
+class FinnhubProvider:
+    BASE = "https://finnhub.io/api/v1"
+
+    def __init__(self):
+        self.key = _get_secret("FINNHUB_API_KEY")
+        self.enabled = bool(self.key)
+
+    def _get(self, path: str, **params) -> dict:
+        if not self.enabled:
+            return _err("FINNHUB_API_KEY 미설정")
+        params["token"] = self.key
+        try:
+            r = _http_get(f"{self.BASE}{path}", params=params, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            return {"success": True, "data": r.json()}
+        except Exception as e:
+            return _err(str(e))
+
+    def quote(self, symbol: str) -> dict:
+        if not _valid_ticker(symbol):
+            return _err(f"잘못된 종목 심볼: {symbol!r}")
+        r = self._get("/quote", symbol=symbol)
+        if not r["success"]:
+            return r
+        d = r["data"] or {}
+        price = d.get("c")
+        if not price:
+            return _err("Finnhub 가격 없음")
+        return {"success": True, "symbol": symbol, "price": float(price),
+                "open": d.get("o"), "high": d.get("h"), "low": d.get("l"),
+                "change": d.get("d"), "change_pct": d.get("dp"), "raw": d}
+
+    def metric(self, symbol: str) -> dict:
+        """기업 펀더멘털 지표 (PER/PBR/EPS/시총 등)."""
+        if not _valid_ticker(symbol):
+            return _err(f"잘못된 종목 심볼: {symbol!r}")
+        r = self._get("/stock/metric", symbol=symbol, metric="all")
+        if not r["success"]:
+            return r
+        m = (r["data"] or {}).get("metric") or {}
+        return {"success": True, "symbol": symbol,
+                "per": m.get("peTTM") or m.get("peBasicExclExtraTTM"),
+                "pbr": m.get("pbAnnual") or m.get("pbQuarterly"),
+                "eps": m.get("epsTTM") or m.get("epsBasicExclExtraItemsTTM"),
+                "market_cap": m.get("marketCapitalization"),
+                "raw": m}
+
+
+# ══════════════════════════════════════════════════════════════
 #  레지스트리 & 상태 점검
 # ══════════════════════════════════════════════════════════════
 _REGISTRY: dict[str, object] = {}
@@ -771,6 +1180,10 @@ def _registry() -> dict:
             "ls": LSProvider(),
             "kiwoom": KiwoomProvider(),
             "dart": DARTProvider(),
+            "stooq": StooqProvider(),
+            "naver": NaverProvider(),
+            "daum": DaumProvider(),
+            "finnhub": FinnhubProvider(),
         })
         return _REGISTRY
 
@@ -792,6 +1205,7 @@ def provider_status() -> dict:
 __all__ = [
     "AlphaVantageProvider", "YahooFinanceProvider", "FMPProvider",
     "KISProvider", "LSProvider", "KiwoomProvider", "DARTProvider",
+    "StooqProvider", "NaverProvider", "DaumProvider", "FinnhubProvider",
     "get_provider", "provider_status",
 ]
 

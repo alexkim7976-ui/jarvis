@@ -17,8 +17,9 @@ J.A.R.V.I.S — Whale / 13F / Politician Trade Tracker
   WHALE_SELL_ALERT_USD=1000000
   SEC_USER_AGENT="Jarvis taehyeonkim@example.com"
 """
-
 from __future__ import annotations
+
+from speech_style import USER_DISPLAY_NAME
 
 import json
 import os
@@ -515,7 +516,7 @@ class WhaleTracker:
         evt = {
             "source": "whale_tracker",
             "type": "big_sell",
-            "message": "선생님, 주요 자산가들의 대량 매도 시그널이 포착되었습니다. 리스크 관리가 필요합니다.",
+            "message": f"{USER_DISPLAY_NAME}, 주요 자산가들의 대량 매도 시그널이 포착되었습니다. 리스크 관리가 필요합니다.",
             "alert_text": "🚨 WHALE SELL ALERT",
             "overlay_table": {
                 "type": "table",
@@ -648,7 +649,7 @@ def execute_whale_tool(tool_name, arguments):
                 "headers": ["종목", "비중"],
                 "rows": rows,
             },
-            "briefing": f"선생님, {data['person']}의 최신 포트폴리오 상위 비중을 화면에 정리했습니다.",
+            "briefing": f"{USER_DISPLAY_NAME}, {data['person']}의 최신 포트폴리오 상위 비중을 화면에 정리했습니다.",
         }
 
     if tool_name == "mirror_whale_portfolio":
@@ -675,7 +676,7 @@ def execute_whale_tool(tool_name, arguments):
             "source": plan["source"],
             "orders": plan["orders"],
             "overlay_table": plan["overlay_table"],
-            "briefing": f"선생님, {plan['person']} 포트폴리오 비중에 맞춰 가상 자산 리밸런싱 계산을 완료했습니다.",
+            "briefing": f"{USER_DISPLAY_NAME}, {plan['person']} 포트폴리오 비중에 맞춰 가상 자산 리밸런싱 계산을 완료했습니다.",
             "applied": apply,
         }
 

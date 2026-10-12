@@ -102,7 +102,8 @@ def test_dynamic_briefing_text():
     text = build_macro_briefing(macro, base_cap=30)
     assert "15%" in text, text
     assert "환율" in text and "VIX" in text, text
-    assert "위험 신호" in text
+    # 자연스러운 구어체 브리핑 — 시장 신호 악화를 프레이밍하는지 검증
+    assert "신호" in text and "안 좋" in text, text
     print("✓ 동적 브리핑 텍스트:", text)
 
 

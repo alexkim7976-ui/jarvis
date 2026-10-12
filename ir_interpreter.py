@@ -19,8 +19,9 @@ Whisper STT + Gemini 번역/요약으로 한국어 IR 콘콜 브리핑 보드를
   brew install streamlink ffmpeg
   pip install openai google-generativeai
 """
-
 from __future__ import annotations
+
+from speech_style import USER_DISPLAY_NAME
 
 import io
 import json
@@ -151,7 +152,7 @@ class IRInterpreter:
         return {
             "success": True,
             "message": f"{self.company} 실시간 IR 통역을 시작했습니다.",
-            "briefing": f"선생님, {self.company} 실시간 IR 통역을 시작했습니다.",
+            "briefing": f"{USER_DISPLAY_NAME}, {self.company} 실시간 IR 통역을 시작했습니다.",
         }
 
     def stop(self) -> dict:
@@ -161,7 +162,7 @@ class IRInterpreter:
             self._stream_thread.join(timeout=3)
         if self._summary_thread:
             self._summary_thread.join(timeout=3)
-        return {"success": True, "message": "IR 통역을 중지했습니다.", "briefing": "IR 통역을 중지했습니다, 선생님."}
+        return {"success": True, "message": "IR 통역을 중지했습니다.", "briefing": f"IR 통역을 중지했습니다, {USER_DISPLAY_NAME}."}
 
     def get_events(self):
         events = []
@@ -334,7 +335,7 @@ class IRInterpreter:
             ["최근자막", chunks[-1]["text"][:36] if chunks else ""],
         ]
         briefing = (
-            "선생님, 현재 진행 중인 콘퍼런스 콜의 새로운 질의응답 핵심 요약이 도착했습니다. "
+            f"{USER_DISPLAY_NAME}, 현재 진행 중인 콘퍼런스 콜의 새로운 질의응답 핵심 요약이 도착했습니다. "
             + (summary.get("summary") or summary.get("risks") or "")[:180]
         )
         return {

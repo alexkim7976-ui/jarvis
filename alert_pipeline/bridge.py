@@ -6,6 +6,8 @@ jarvis_v2 메인 루프의 폴링 계약(get_events/requeue)을 그대로 따른
 인메모리·스레드 세이프(deque + RLock) — 기존 워커들과 동일 정렬.
 """
 from __future__ import annotations
+
+from speech_style import USER_DISPLAY_NAME
 import threading
 from collections import deque
 
@@ -74,7 +76,7 @@ class EventBridge:
         label = stress.get("worst", {}).get("label", "매크로 충격")
         disp = name or ticker
         msg = briefing or (
-            f"선생님, {disp} 기준 '{label}' 시나리오에서 예상 최대 낙폭(MDD)이 "
+            f"{USER_DISPLAY_NAME}, {disp} 기준 '{label}' 시나리오에서 예상 최대 낙폭(MDD)이 "
             f"{mdd:.0f}%로 추정됩니다." +
             (f" 손실 임계 초과로 비중 {reweight.get('haircut_pct', 0):.0f}% 축소를 권고합니다."
              if triggered else " 관리 임계 이내로 비중을 유지합니다.")
@@ -104,7 +106,7 @@ class EventBridge:
                "allow": Severity.INFO}.get(decision.action, Severity.INFO)
         verb = {"block": "차단", "step_up": "추가 인증 요구", "allow": "허용"}[decision.action]
         msg = message or (
-            f"선생님, 행동 위험 점수 {decision.risk_score}점 — "
+            f"{USER_DISPLAY_NAME}, 행동 위험 점수 {decision.risk_score}점 — "
             f"'{decision.command}' 요청을 {verb}했습니다."
         )
         overlay = {

@@ -94,8 +94,11 @@ def test_local_consensus_matrix_layers():
 
 
 def test_extended_tool_execution_caches_metrics():
-    from hybrid_router import try_local_tool_execution
+    # analyze_stock_multi_source 는 교차검증 전용(라우팅 None)이므로 멀티에이전트 캐싱은
+    # 실제 진입점(refresh_local_analysis_report)으로 검증한다.
+    from local_intelligence.engine import refresh_local_analysis_report, format_tool_response
     from local_intelligence.report_cache import set_report_path_for_tests, read_store, clear_reports
+    from local_intelligence.multi_agent import set_ollama_stage_fn
 
     mock_ctx = {
         "ticker": "NVDA",
@@ -120,13 +123,21 @@ def test_extended_tool_execution_caches_metrics():
         "anomaly_flag": False,
     }
 
+    _saved = {k: os.environ.get(k) for k in ("LOCAL_INTEL_OLLAMA_ENABLED", "LOCAL_INTEL_MULTI_AGENT")}
+    os.environ["LOCAL_INTEL_OLLAMA_ENABLED"] = "1"
+    os.environ["LOCAL_INTEL_MULTI_AGENT"] = "1"
+    set_ollama_stage_fn(lambda s, p: {
+        "agent_a": "기술 요약", "agent_b": "가치 요약",
+        "orchestrator": "밸류에이션과 기술 지표를 종합한 요약이야.",
+    }.get(s, ""))
+
     with tempfile.TemporaryDirectory() as td:
         rp = Path(td) / "local_analysis_report.json"
         set_report_path_for_tests(rp)
         try:
             with patch("local_intelligence.engine.gather_fusion_context", return_value=mock_ctx):
-                result = try_local_tool_execution(
-                    "analyze_stock_multi_source", {"query": "NVDA"},
+                result = format_tool_response(
+                    refresh_local_analysis_report("NVDA", force_ollama=True)
                 )
             assert result is not None
             assert result.get("gemini_called") is False
@@ -142,6 +153,12 @@ def test_extended_tool_execution_caches_metrics():
         finally:
             clear_reports()
             set_report_path_for_tests(None)
+            set_ollama_stage_fn(None)
+            for _k, _v in _saved.items():
+                if _v is None:
+                    os.environ.pop(_k, None)
+                else:
+                    os.environ[_k] = _v
     print("✓ tool execution → extended cache, gemini_called false")
 
 

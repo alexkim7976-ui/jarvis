@@ -2,10 +2,33 @@
 
 ```
 ╔══════════════════════════════════════════════════════════════╗
-║     Just A Rather Very Intelligent System  ·  v1.0          ║
-║     MediaPipe · Whisper · GPT / Claude · Fish Audio          ║
+║     Just A Rather Very Intelligent System  ·  v3.2          ║
+║     MediaPipe · Whisper · Gemini / Ollama · Iron Man HUD     ║
 ╚══════════════════════════════════════════════════════════════╝
 ```
+
+---
+
+## 🖥 macOS 앱으로 쓰기 (권장)
+
+### 사용자
+1. `JARVIS-3.2.0-mac.dmg` 열기 → `JARVIS.app` 을 응용 프로그램으로 드래그  
+2. 더블클릭 실행 → 첫 설정에서 Gemini API 키 입력  
+3. 카메라·마이크 권한 허용  
+
+자세한 출시/배포: [APP_RELEASE.md](APP_RELEASE.md)
+
+### 개발자 — 출시 앱·DMG 만들기
+```bash
+# 더블클릭
+open "Build Release App.command"
+
+# 또는 터미널
+./scripts/build_release_app.sh --full
+# → dist/JARVIS.app , dist/JARVIS-3.2.0-mac.dmg
+```
+
+로컬 개발용 런처만 필요할 때: `Install JARVIS App.command`
 
 ---
 
@@ -13,12 +36,12 @@
 
 ```
 jarvis/
-├── jarvis.py          ← 메인 애플리케이션
-├── find_voice.py      ← Fish Audio 보이스 탐색 도우미
+├── jarvis_v2.py       ← 메인 애플리케이션 (HUD + 도구)
+├── Build Release App.command  ← 출시용 .app + DMG 빌드
 ├── requirements.txt   ← Python 의존성
 ├── .env.example       ← 환경 변수 템플릿
-├── .env               ← 실제 API 키 (직접 생성, 절대 공유 금지!)
-├── audio_cache/       ← STT 입력 WAV & TTS 출력 MP3 저장
+├── .env               ← 실제 API 키 (절대 공유 금지)
+├── APP_RELEASE.md     ← 앱 출시 가이드
 └── README.md
 ```
 

@@ -18,6 +18,8 @@ import requests
 from openai import OpenAI
 from dotenv import load_dotenv
 
+from speech_style import USER_DISPLAY_NAME, USER_NAME_RULES
+
 # ──────────────────────────────────────────────
 #  설정 로드
 # ──────────────────────────────────────────────
@@ -60,8 +62,8 @@ Response format:
 - Always end with an optional proactive offer when appropriate
 - Respond in the SAME LANGUAGE the user speaks (Korean -> Korean, English -> English)
 
-Korean mode: When speaking Korean, maintain the JARVIS persona with formal/polite speech.
-Use "선생님" or context-appropriate address. Keep the same calm, intelligent tone."""
+Korean mode: When speaking Korean, maintain the JARVIS persona with natural casual speech.
+""" + USER_NAME_RULES + f"""Always address the user as "{USER_DISPLAY_NAME}". Never use "Tony", "토니", or "선생님"."""
 
 # ──────────────────────────────────────────────
 #  유틸리티
@@ -223,7 +225,7 @@ def ask_jarvis(user_text, openai_client, history):
     if LLM_PROVIDER == "gemini":
         if not GEMINI_API_KEY:
             log("ERR", ".env 파일에 GEMINI_API_KEY가 없습니다.")
-            return "죄송합니다, 선생님. Gemini API 키가 설정되지 않았습니다."
+            return f"죄송합니다, {USER_DISPLAY_NAME}. Gemini API 키가 설정되지 않았습니다."
         answer = ask_jarvis_gemini(user_text, history)
     else:
         answer = ask_jarvis_openai(user_text, openai_client, history)

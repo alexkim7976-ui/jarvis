@@ -28,6 +28,35 @@ MACRO_BASE_BUY_CAP = int(os.getenv("JARVIS_MACRO_BASE_BUY_CAP", "30"))
 MACRO_ALERT_LEVEL = os.getenv("JARVIS_MACRO_ALERT_LEVEL", "위험")
 
 
+from speech_style import polish_for_voice
+
+
+def _fx_elevated(macro: dict) -> bool:
+    """원달러 환율 관련 경계/위험 사유가 있는지."""
+    reasons = macro.get("reasons") or []
+    return any("환율" in str(r) or "원달러" in str(r) for r in reasons)
+
+
+def _macro_alert_text(macro: dict) -> str:
+    """HUD 상단 배너용 한국어 경고 문구."""
+    reasons = macro.get("reasons") or []
+    fx = [str(r) for r in reasons if "환율" in str(r) or "원달러" in str(r)]
+    if fx:
+        return f"⚠ 환율 상승 — {fx[0]}"
+    level = macro.get("risk_level", "경계")
+    if reasons:
+        return f"⚠ 매크로 {level} — {reasons[0]}"
+    return "⚠ 매크로 시장 경고"
+
+
+def _enhance_overlay_table(macro: dict) -> dict:
+    """overlay_table + alert_text/theme 보강 (웹캠 HUD 투사용)."""
+    table = dict(macro.get("overlay_table") or {})
+    table["theme"] = macro.get("risk_level", table.get("theme", "경계"))
+    table["alert_text"] = table.get("alert_text") or _macro_alert_text(macro)
+    return table
+
+
 def build_macro_briefing(macro: dict, base_cap: int = MACRO_BASE_BUY_CAP) -> str:
     """매크로 상태 dict에서 위험 경고 + 자산 배분 가이드 브리핑 텍스트를 동적으로 생성."""
     mult = macro.get("allocation_multiplier", 0.5)
@@ -37,11 +66,10 @@ def build_macro_briefing(macro: dict, base_cap: int = MACRO_BASE_BUY_CAP) -> str
         mult = 0.5
     buy_cap = max(0, int(round(base_cap * mult)))
     reasons = macro.get("reasons") or []
-    reason_phrase = ", ".join(str(r) for r in reasons[:2]) if reasons else "환율 및 변동성 지표 급등"
-    return (
-        f"토니, 매크로 가드레일 위험 신호가 발생했습니다. "
-        f"{reason_phrase}으로 인해 보유 포트폴리오의 매수 비중 상한선이 즉시 {buy_cap}%로 제한됩니다. "
-        f"신규 진입은 보수적으로 접근하시기 바랍니다."
+    reason_phrase = ", ".join(str(r) for r in reasons[:2]) if reasons else "환율이랑 변동성 지표"
+    return polish_for_voice(
+        f"지금 시장 쪽 신호가 좀 안 좋아졌어. {reason_phrase} 때문에 "
+        f"새로 사는 비중은 {buy_cap}% 정도로만 잡는 게 좋겠어."
     )
 
 
@@ -64,6 +92,7 @@ class MacroGuardWatcher(threading.Thread):
         # 중복 알림 방지용 상태 플래그
         self.last_macro_status: str | None = None
         self.is_briefed: bool = False
+        self.is_fx_screen_shown: bool = False
 
     # ── 상태 조회 (캐시 연동) ──
     def _get_status(self) -> dict | None:
@@ -119,19 +148,39 @@ class MacroGuardWatcher(threading.Thread):
                 self.is_briefed = True
                 evt = {
                     "message": build_macro_briefing(macro, self.base_cap),
-                    "overlay_table": macro.get("overlay_table"),
+                    "overlay_table": _enhance_overlay_table(macro),
                     "risk_level": level,
                     "prev_level": prev,
-                    "alert_text": "🚨 MACRO RISK GUARDRAIL",
+                    "alert_text": _macro_alert_text(macro),
+                    "overlay_duration": 60,
+                    "screen_only": False,
                 }
                 self._events.put(evt)
                 self._log("INTR", f"🚨 매크로 위험 격상 감지(이전={prev}) — 선제 브리핑 큐잉")
                 return evt
+            elif level == "경계" and _fx_elevated(macro):
+                # 환율 상승 등 경계 — 화면 경고만 (음성은 위험 격상 시)
+                if not self.is_fx_screen_shown:
+                    self.is_fx_screen_shown = True
+                    evt = {
+                        "message": "",
+                        "overlay_table": _enhance_overlay_table(macro),
+                        "risk_level": level,
+                        "prev_level": prev,
+                        "alert_text": _macro_alert_text(macro),
+                        "overlay_duration": 60,
+                        "screen_only": True,
+                    }
+                    self._events.put(evt)
+                    self._log("INTR", "⚠ 환율/매크로 경계 — 화면 경고 표시")
+                    return evt
             else:
-                # 안정/경계로 회복 → 디바운스 해제(다음 '위험' 격상 시 재알림)
+                # 안정/경계(환율 외)로 회복 → 디바운스 해제(다음 '위험' 격상 시 재알림)
                 if self.is_briefed:
                     self._log("INFO", f"매크로 회복: {level} — 알림 디바운스 해제")
                 self.is_briefed = False
+                if level == "안정" or not _fx_elevated(macro):
+                    self.is_fx_screen_shown = False
                 return None
 
     def run(self) -> None:

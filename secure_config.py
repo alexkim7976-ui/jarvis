@@ -30,6 +30,12 @@ SECRET_KEYS = [
     "OPENWEATHER_API_KEY",
     "GITHUB_TOKEN",
     "QUIVER_API_KEY",
+    "TELEGRAM_BOT_TOKEN",
+    "SUPPLY_CHAIN_API_KEY",
+    "OPENCLAW_GATEWAY_TOKEN",
+    "GROQ_API_KEY",
+    "OPENROUTER_API_KEY",
+    "JARVIS_AUDIT_HMAC_KEY",
     # ── 주식 데이터 프로바이더 (data_providers.py) ──
     "ALPHAVANTAGE_API_KEY",
     "FMP_API_KEY",
@@ -37,6 +43,7 @@ SECRET_KEYS = [
     "LS_APP_KEY", "LS_APP_SECRET",
     "KIWOOM_APP_KEY", "KIWOOM_APP_SECRET",
     "DART_API_KEY",
+    "FINNHUB_API_KEY",
 ]
 
 _keyring_available = False
@@ -57,17 +64,45 @@ def _log(level: str, msg: str):
 
 
 # ── 키 읽기 (Keychain 우선 → .env 폴백) ──
+def _is_secret_placeholder(val: str) -> bool:
+    if not val:
+        return True
+    if val == "STORED_IN_KEYCHAIN":
+        return True
+    return val.startswith("your_")
+
+
 def get_secret(key: str, default: str = "") -> str:
     """
     API 키 조회 — Keychain 우선, .env 폴백.
-    기업 모드(Keychain 활성)에서는 .env를 참조하지 않음.
+    JARVIS_KEYCHAIN_ONLY=1 이면 SECRET_KEYS 는 Keychain(또는 시스템 env)만 허용.
     """
-    # 1순위: 환경변수 (이미 로드됨)
+    keychain_only = False
+    try:
+        from security_policy import keychain_only_mode
+        keychain_only = keychain_only_mode()
+    except ImportError:
+        pass
+
+    # Keychain 전용: Keychain → 유효한 환경변수 순
+    if keychain_only and key in SECRET_KEYS:
+        if _keyring_available:
+            try:
+                stored = keyring.get_password(SERVICE_NAME, key)
+                if stored:
+                    return stored
+            except Exception:
+                pass
+        val = os.environ.get(key, "")
+        if val and not _is_secret_placeholder(val):
+            return val
+        return default
+
+    # 표준: 환경변수 → Keychain
     val = os.environ.get(key, "")
-    if val:
+    if val and not _is_secret_placeholder(val):
         return val
 
-    # 2순위: macOS Keychain
     if _keyring_available:
         try:
             stored = keyring.get_password(SERVICE_NAME, key)
@@ -203,7 +238,8 @@ def get_security_status() -> dict:
     }
 
     for key in SECRET_KEYS:
-        in_env = bool(os.environ.get(key, ""))
+        val = os.environ.get(key, "")
+        in_env_plain = bool(val) and not _is_secret_placeholder(val)
         in_keychain = False
         if _keyring_available:
             try:
@@ -213,7 +249,7 @@ def get_security_status() -> dict:
 
         if in_keychain:
             loc = "🔒 Keychain"
-        elif in_env:
+        elif in_env_plain:
             loc = "⚠ .env (평문)"
         else:
             loc = "✗ 미설정"
@@ -242,9 +278,9 @@ _KEY_PATTERNS = [
     r"[a-f0-9]{32,}",                          # 32자+ 16진수 (일반 API 키)
     r"Bearer\s+[A-Za-z0-9._-]{20,}",          # Bearer 토큰
     r"token['\"]?\s*[:=]\s*['\"][^'\"]{20,}", # token = "..."
-    r"(?i)(password|passwd|secret|api[_-]?key)['\"]?\s*[:=]\s*['\"][^'\"]{8,}",  # 자격증명 할당
+    r"(password|passwd|secret|api[_-]?key)['\"]?\s*[:=]\s*['\"][^'\"]{8,}",  # 자격증명 할당
 ]
-_KEY_RE = re.compile("|".join(_KEY_PATTERNS))
+_KEY_RE = re.compile("|".join(_KEY_PATTERNS), re.IGNORECASE)
 
 def filter_llm_output(text: str) -> str:
     """
@@ -272,12 +308,14 @@ if __name__ == "__main__":
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
     elif "--delete-env" in sys.argv:
-        confirm = input("⚠ .env에서 API 키 값을 제거합니다. Keychain에 저장되었는지 확인했나요? (yes/no): ")
-        if confirm.lower() == "yes":
-            removed = remove_secrets_from_env()
-            print(f"✓ {removed}개 키 제거 완료")
-        else:
-            print("취소됨")
+        auto_yes = "--yes" in sys.argv or "-y" in sys.argv
+        if not auto_yes:
+            confirm = input("⚠ .env에서 API 키 값을 제거합니다. Keychain에 저장되었는지 확인했나요? (yes/no): ")
+            if confirm.lower() != "yes":
+                print("취소됨")
+                raise SystemExit(0)
+        removed = remove_secrets_from_env()
+        print(f"✓ {removed}개 키 제거 완료")
 
     elif "--status" in sys.argv:
         st = get_security_status()
@@ -291,3 +329,4 @@ if __name__ == "__main__":
         print("  python3 secure_config.py --migrate     .env → Keychain 이전")
         print("  python3 secure_config.py --status      보안 상태 확인")
         print("  python3 secure_config.py --delete-env   .env에서 키 삭제")
+        print("  python3 secure_config.py --delete-env --yes  (비대화형)")

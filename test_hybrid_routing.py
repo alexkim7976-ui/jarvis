@@ -7,6 +7,7 @@ Hybrid Routing & Local Intelligence 격리 테스트
 """
 from __future__ import annotations
 
+from speech_style import USER_DISPLAY_NAME
 import json
 import os
 import sys
@@ -29,7 +30,7 @@ def test_light_trade_record_routes_ollama_zero_gemini():
     )
 
     reset_call_counts()
-    ollama_fn = MagicMock(return_value="매매 기록 처리했습니다, 선생님.")
+    ollama_fn = MagicMock(return_value=f"매매 기록 처리했습니다, {USER_DISPLAY_NAME}.")
     gemini_fn = MagicMock(return_value="should not be called")
 
     engine = HybridRoutingEngine()
@@ -170,47 +171,24 @@ def test_tool_classification_local_vs_expert():
     print("✓ tool tier classification")
 
 
-def test_local_tool_execution_caches_report_zero_gemini():
+def test_local_tool_execution_routes_specialized_handlers():
     from hybrid_router import try_local_tool_execution, reset_call_counts, get_gemini_call_count
-    from local_intelligence.report_cache import set_report_path_for_tests, read_store, clear_reports
 
     reset_call_counts()
-    mock_ctx = {
-        "ticker": "NVDA",
-        "query": "NVDA",
-        "name": "NVIDIA",
-        "consensus_price": 120.5,
-        "change_pct": -1.2,
-        "rsi": 42.0,
-        "hybrid_score": 68,
-        "bb_squeeze": True,
-        "sentiment_score": 3,
-        "compact_digest": "Yahoo/FMP 합의 120.5",
-        "sources_ok": ["Yahoo Finance"],
-        "tech_signals": {},
-        "timeline_text": "합의가 120.5",
-        "anomaly_flag": False,
-    }
-
-    with tempfile.TemporaryDirectory() as td:
-        rp = Path(td) / "local_analysis_report.json"
-        set_report_path_for_tests(rp)
-        try:
-            with patch("local_intelligence.engine.gather_fusion_context", return_value=mock_ctx):
-                result = try_local_tool_execution(
-                    "analyze_stock_multi_source", {"query": "NVDA"},
-                )
-            assert result is not None
-            assert result.get("gemini_called") is False
-            assert result.get("local_intelligence") is True
-            assert "120.5" in result.get("briefing", "") or result.get("success")
-            store = read_store()
-            assert "NVDA" in store.get("reports", {})
-            assert get_gemini_call_count() == 0
-        finally:
-            clear_reports()
-            set_report_path_for_tests(None)
-    print("✓ local tool → report cache, Gemini 0")
+    with patch(
+        "stock_quant.get_comprehensive_matrix_score",
+        return_value={"success": True, "briefing": "매트릭스 72점", "gemini_called": False},
+    ):
+        result = try_local_tool_execution(
+            "get_comprehensive_matrix_score", {"ticker": "NVDA"},
+        )
+    assert result is not None
+    assert result.get("success") is True
+    assert get_gemini_call_count() == 0
+    assert try_local_tool_execution(
+        "analyze_stock_multi_source", {"query": "NVDA"},
+    ) is None
+    print("✓ local tool → specialized handlers, multi_source not hijacked")
 
 
 def run_all():
@@ -223,7 +201,7 @@ def run_all():
         test_ollama_exception_fallback_to_gemini,
         test_hybrid_disabled_legacy,
         test_tool_classification_local_vs_expert,
-        test_local_tool_execution_caches_report_zero_gemini,
+        test_local_tool_execution_routes_specialized_handlers,
     ]
     failed = 0
     for fn in tests:

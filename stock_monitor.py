@@ -21,6 +21,7 @@ LLM이 add_stock_alert() 도구를 호출해 규칙을 등록한다.
 """
 from __future__ import annotations
 
+from speech_style import USER_DISPLAY_NAME
 import concurrent.futures
 import json
 import os
@@ -362,16 +363,16 @@ class StockMonitor:
         # ── 1단계: 기본 TTS 메시지 & overlay 구성 ──
         ptc = _ko_subject_particle(rule.name)   # '이' or '가'
         if rule.condition_type == "change_pct_down":
-            base_msg = (f"선생님, {rule.name}{ptc} 현재 전일 대비 "
+            base_msg = (f"{USER_DISPLAY_NAME}, {rule.name}{ptc} 현재 전일 대비 "
                         f"{abs(change_pct):.1f}% 급락 중입니다. 현재가 {price_s}입니다.")
         elif rule.condition_type == "change_pct_up":
-            base_msg = (f"선생님, {rule.name}{ptc} 현재 전일 대비 "
+            base_msg = (f"{USER_DISPLAY_NAME}, {rule.name}{ptc} 현재 전일 대비 "
                         f"{change_pct:.1f}% 급등 중입니다. 현재가 {price_s}입니다.")
         elif rule.condition_type == "price_below":
-            base_msg = (f"선생님, {rule.name} 주가가 {price_s}까지 하락하여 "
+            base_msg = (f"{USER_DISPLAY_NAME}, {rule.name} 주가가 {price_s}까지 하락하여 "
                         f"설정하신 목표가 이하에 진입했습니다.")
         else:  # price_above
-            base_msg = (f"선생님, {rule.name} 주가가 {price_s}까지 상승하여 "
+            base_msg = (f"{USER_DISPLAY_NAME}, {rule.name} 주가가 {price_s}까지 상승하여 "
                         f"설정하신 목표가를 돌파했습니다.")
 
         alert_text = f"🚨 {rule.name} {cond_label} 알림"
@@ -416,14 +417,14 @@ class StockMonitor:
                 if route.gemini_summary:
                     if rule.condition_type == "change_pct_down":
                         base_msg = (
-                            f"선생님, {rule.name}{ptc} 현재 전일 대비 "
+                            f"{USER_DISPLAY_NAME}, {rule.name}{ptc} 현재 전일 대비 "
                             f"{abs(change_pct):.1f}% 급락 중입니다. "
                             f"AI 분석 결과, {route.gemini_summary} 관련 뉴스가 주요 원인으로 포착되었습니다. "
                             f"현재가 {price_s}입니다."
                         )
                     elif rule.condition_type == "change_pct_up":
                         base_msg = (
-                            f"선생님, {rule.name}{ptc} 현재 전일 대비 "
+                            f"{USER_DISPLAY_NAME}, {rule.name}{ptc} 현재 전일 대비 "
                             f"{change_pct:.1f}% 급등 중입니다. "
                             f"AI 분석 결과, {route.gemini_summary} 관련 뉴스가 주요 배경으로 포착되었습니다. "
                             f"현재가 {price_s}입니다."
@@ -454,14 +455,14 @@ class StockMonitor:
                 if has_real_summary:
                     if rule.condition_type == "change_pct_down":
                         base_msg = (
-                            f"선생님, {rule.name}{ptc} 현재 전일 대비 "
+                            f"{USER_DISPLAY_NAME}, {rule.name}{ptc} 현재 전일 대비 "
                             f"{abs(change_pct):.1f}% 급락 중입니다. "
                             f"AI 분석 결과, {summary} 관련 뉴스가 주요 원인으로 포착되었습니다. "
                             f"현재가 {price_s}입니다."
                         )
                     elif rule.condition_type == "change_pct_up":
                         base_msg = (
-                            f"선생님, {rule.name}{ptc} 현재 전일 대비 "
+                            f"{USER_DISPLAY_NAME}, {rule.name}{ptc} 현재 전일 대비 "
                             f"{change_pct:.1f}% 급등 중입니다. "
                             f"AI 분석 결과, {summary} 관련 뉴스가 주요 배경으로 포착되었습니다. "
                             f"현재가 {price_s}입니다."

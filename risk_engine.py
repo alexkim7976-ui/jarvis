@@ -21,6 +21,7 @@ stock_quant.py 의 3레이어 매트릭스 엔진을 정적 스냅샷에서 시�
 """
 from __future__ import annotations
 
+from speech_style import USER_DISPLAY_NAME
 import asyncio
 import math
 import threading
@@ -250,7 +251,7 @@ def build_forecast_briefing(name: str, stress: dict, reweight: dict,
     label = worst.get("label", "매크로 충격")
     n = stress.get("n_sims", DEFAULT_N_SIMS)
     parts = [
-        f"토니, 몬테카를로 {n:,}회 시뮬레이션 결과 현재 포트폴리오는 "
+        f"{USER_DISPLAY_NAME}, 몬테카를로 {n:,}회 시뮬레이션 결과 현재 포트폴리오는 "
         f"'{label}' 시나리오 발생 시 예상 최대 낙폭(MDD)이 {mdd:.0f}%까지 확대됩니다."
     ]
     if reweight.get("triggered"):

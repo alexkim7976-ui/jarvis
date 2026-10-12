@@ -31,4 +31,8 @@ fi
 
 # shellcheck disable=SC1091
 source ".venv/bin/activate"
+
+# AI 스택 자동 검증 (Ollama·모델·무료 모드)
+python verify_ai_stack.py
+
 exec python jarvis_v2.py
