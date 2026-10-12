@@ -2,12 +2,15 @@
 J.A.R.V.I.S — 음성 모드 제스처 (MediaPipe HandState)
 
 G키 마우스 제어 OFF일 때:
-  ✋ OPEN (손바닥)  → TTS/녹음 일시정지
-  ✊ FIST (주먹)    → 음소거
-  👍 THUMB_UP       → 확인 (대기 중 선택·승인)
+  ☝ POINT (검지)     → 음성 명령 녹음 시작
+  ✌ PEACE (브이)     → 녹음 종료 후 명령 전송
+  ✋ OPEN (손바닥)    → TTS/녹음 일시정지
+  ✊ FIST (주먹)      → 음소거
+  👍 THUMB_UP         → 확인 (대기 중 선택·승인)
+  🖐 THREE            → 재생/일시정지
 
 환경변수:
-  JARVIS_VOICE_GESTURES   1 — 음성 모드 제스처 (기본 ON)
+  JARVIS_VOICE_GESTURES   1 — 일시정지/음소거/확인 (기본 ON)
 """
 from __future__ import annotations
 
@@ -27,14 +30,8 @@ def detect_from_landmarks(hl, frame_w: int, frame_h: int) -> str:
     """MediaPipe hand landmarks → OPEN | FIST | THUMB_UP | ..."""
     hs = HandState(hl.landmark, frame_w, frame_h)
     g = hs.detect_gesture()
-    if g == "OPEN":
-        return "OPEN"
-    if g == "FIST":
-        return "FIST"
-    if g == "THUMB_UP":
-        return "THUMB_UP"
-    if g == "THREE":
-        return "THREE"
+    if g in ("OPEN", "FIST", "THUMB_UP", "THREE", "POINT", "PEACE"):
+        return g
     return "NONE"
 
 
@@ -52,19 +49,31 @@ class VoiceGestureHandler:
         on_mute: Callable[[], None],
         on_confirm: Callable[[], None],
         on_play_pause: Callable[[], None] | None = None,
+        on_command_start: Callable[[], bool] | None = None,
+        on_command_stop: Callable[[], bool] | None = None,
         log_fn: Callable[[str, str], None] | None = None,
     ):
         self._on_pause = on_pause
         self._on_mute = on_mute
         self._on_confirm = on_confirm
         self._on_play_pause = on_play_pause
+        self._on_command_start = on_command_start
+        self._on_command_stop = on_command_stop
         self._log = log_fn or (lambda _l, _m: None)
         self._last_action = ""
         self._last_at = 0.0
+        self._latch = ""
+
+    def observe(self, gesture: str) -> None:
+        """매 프레임 호출. 손이 그 제스처를 떠나면 재실행을 허용한다."""
+        if gesture != self._latch:
+            self._latch = ""
 
     def handle(self, gesture: str, *, cooldown_sec: float = 1.2) -> bool:
         """제스처 처리. True면 액션 실행됨."""
-        if not voice_gestures_enabled() or gesture in ("NONE", ""):
+        if gesture in ("NONE", ""):
+            return False
+        if gesture == self._latch:
             return False
         import time
         now = time.time()
@@ -72,19 +81,27 @@ class VoiceGestureHandler:
             return False
 
         acted = False
-        if gesture == "OPEN":
+        if gesture == "POINT" and self._on_command_start:
+            acted = bool(self._on_command_start())
+            if acted:
+                self._log("INFO", "☝ 검지 → 손짓 명령 시작")
+        elif gesture == "PEACE" and self._on_command_stop:
+            acted = bool(self._on_command_stop())
+            if acted:
+                self._log("INFO", "✌ 브이 → 손짓 명령 전송")
+        elif voice_gestures_enabled() and gesture == "OPEN":
             self._on_pause()
             self._log("INFO", "✋ 손바닥 → 일시정지")
             acted = True
-        elif gesture == "FIST":
+        elif voice_gestures_enabled() and gesture == "FIST":
             self._on_mute()
             self._log("INFO", "✊ 주먹 → 음소거")
             acted = True
-        elif gesture == "THUMB_UP":
+        elif voice_gestures_enabled() and gesture == "THUMB_UP":
             self._on_confirm()
             self._log("INFO", "👍 엄지 → 확인")
             acted = True
-        elif gesture == "THREE" and self._on_play_pause:
+        elif voice_gestures_enabled() and gesture == "THREE" and self._on_play_pause:
             self._on_play_pause()
             self._log("INFO", "🖐 세 손가락 → 재생/일시정지")
             acted = True
@@ -92,4 +109,5 @@ class VoiceGestureHandler:
         if acted:
             self._last_action = gesture
             self._last_at = now
+            self._latch = gesture
         return acted

@@ -208,7 +208,7 @@ class IronManHUD:
             lines=wrap_text(answer,w-40,14)
             for i,ln in enumerate(lines[:2]):
                 put_text(frame,ln,(20,h-20+i*16),size=14,color=CYAN)
-        cv2.putText(frame,"SPACE:Rec  R:Face  W:Wake  L:Log  D:Overlay  Q:Quit",(w-380,h-65),cv2.FONT_HERSHEY_SIMPLEX,0.26,CYAN_DARK,1,cv2.LINE_AA)
+        cv2.putText(frame,"Enter:Type  POINT:Talk  V:Send  G:Mouse  Q:Quit",(w-360,h-65),cv2.FONT_HERSHEY_SIMPLEX,0.28,CYAN_DARK,1,cv2.LINE_AA)
 
     def _draw_particles(self,frame,h,w):
         for p in self._particles:

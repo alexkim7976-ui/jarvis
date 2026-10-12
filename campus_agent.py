@@ -22,7 +22,7 @@ Fall 2026 학기(2026.8 뉴욕 출국) 준비를 위해 Gmail/Calendar 를 백�
   CAMPUS_AGENT_ENABLED=true
   CAMPUS_CHECK_INTERVAL=600        (초, 기본 10분)
   CAMPUS_LOOKBACK_DAYS=3           (Gmail 조회 범위)
-  CAMPUS_GMAIL_ACCOUNT=taehyeon.kim.2@stonybrook.org  (감시·안내 대상 수신 주소만)
+  CAMPUS_GMAIL_ACCOUNT=  (로그인에서 입력한 학교 메일. 비어 있으면 메일 감시 안 함)
 
 의존성:
   pip install google-api-python-client google-auth google-auth-oauthlib
@@ -49,13 +49,9 @@ from pathlib import Path
 CAMPUS_AGENT_ENABLED  = os.getenv("CAMPUS_AGENT_ENABLED", "true").lower() == "true"
 CAMPUS_CHECK_INTERVAL = int(os.getenv("CAMPUS_CHECK_INTERVAL", "600"))   # 초 (기본 10분)
 CAMPUS_LOOKBACK_DAYS  = int(os.getenv("CAMPUS_LOOKBACK_DAYS", "3"))      # Gmail 조회 범위(일)
-CAMPUS_GMAIL_ACCOUNT  = os.getenv(
-    "CAMPUS_GMAIL_ACCOUNT", "taehyeon.kim.2@stonybrook.org",
-).strip().lower()  # 이 주소로 온 메일만 감시·음성 안내
-CAMPUS_COURSE_SENDER = os.getenv(
-    "CAMPUS_COURSE_SENDER", "taehyeon.kim.2@stonybrook.edu",
-).strip().lower()
-CAMPUS_CALL_TO = os.getenv("CAMPUS_CALL_TO", "+19342217610").strip()
+CAMPUS_GMAIL_ACCOUNT  = os.getenv("CAMPUS_GMAIL_ACCOUNT", "").strip().lower()
+CAMPUS_COURSE_SENDER = os.getenv("CAMPUS_COURSE_SENDER", "").strip().lower()
+CAMPUS_CALL_TO = os.getenv("CAMPUS_CALL_TO", "").strip()
 CAMPUS_CALL_ALERTS = os.getenv("CAMPUS_CALL_ALERTS", "true").strip().lower() == "true"
 
 CRED_DIR   = Path(".credentials")
@@ -117,7 +113,7 @@ def _log(level: str, msg: str):
 
 
 def campus_mail_account() -> str:
-    return CAMPUS_GMAIL_ACCOUNT
+    return os.getenv("CAMPUS_GMAIL_ACCOUNT", "").strip().lower()
 
 
 def _extract_emails(header_val: str) -> list[str]:
@@ -127,10 +123,10 @@ def _extract_emails(header_val: str) -> list[str]:
 
 
 def message_for_campus_account(meta: dict) -> bool:
-    """수신 주소가 CAMPUS_GMAIL_ACCOUNT 와 일치하는 메일만 True."""
+    """수신 주소가 로그인한 학교 메일과 일치하는 메일만 True. 메일이 없으면 감시하지 않는다."""
     acct = campus_mail_account()
     if not acct:
-        return True
+        return False
     recipients: list[str] = []
     for key in ("to", "cc", "delivered_to", "x_original_to", "envelope_to"):
         recipients.extend(_extract_emails(meta.get(key, "")))

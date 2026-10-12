@@ -29,7 +29,7 @@ except ImportError:
 #  Tavily / DuckDuckGo 검색 함수
 # ──────────────────────────────────────────────
 
-def web_search(query, search_depth="basic", max_results=5):
+def _web_search_live(query, search_depth="basic", max_results=5):
     """
     웹 검색 — 무료 모드: DuckDuckGo / 유료: Tavily API
     - query: 검색어
@@ -89,7 +89,7 @@ def web_search(query, search_depth="basic", max_results=5):
         return {"success": False, "message": f"검색 오류: {e}"}
 
 
-def news_search(query, max_results=5):
+def _news_search_live(query, max_results=5):
     """
     뉴스 검색 — 무료 모드: DuckDuckGo / 유료: Tavily topic=news
     """
@@ -138,6 +138,43 @@ def news_search(query, max_results=5):
 
     except Exception as e:
         return {"success": False, "message": f"뉴스 검색 오류: {e}"}
+
+
+def _cached_or_live(query, kind, live, force=False):
+    if not force:
+        try:
+            from interest_prefetch import cached_search
+            hit = cached_search(query, kind)
+            if hit:
+                return hit
+        except Exception:
+            pass
+    result = live()
+    try:
+        from interest_prefetch import remember
+        if isinstance(result, dict):
+            remember(query, kind, result)
+    except Exception:
+        pass
+    return result
+
+
+def web_search(query, search_depth="basic", max_results=5, force=False):
+    """관심 주제가 미리 받아져 있으면 그 결과를 바로 쓰고, 아니면 인터넷에서 가져온다."""
+    return _cached_or_live(
+        query, "web",
+        lambda: _web_search_live(query, search_depth=search_depth, max_results=max_results),
+        force=force,
+    )
+
+
+def news_search(query, max_results=5, force=False):
+    """관심 주제 뉴스가 미리 받아져 있으면 그 결과를 바로 쓰고, 아니면 인터넷에서 가져온다."""
+    return _cached_or_live(
+        query, "news",
+        lambda: _news_search_live(query, max_results=max_results),
+        force=force,
+    )
 
 
 # ──────────────────────────────────────────────

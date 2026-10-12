@@ -39,6 +39,10 @@ portfolio.json
 stock_monitor_rules.json
 voice_profile/
 faces/
+data/accounts.json
+data/interests.json
+data/interest_cache.json
+data/background_control.json
 audio_cache/
 
 # Python

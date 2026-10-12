@@ -172,9 +172,15 @@ def chat_with_tools(
             r.raise_for_status()
             data = r.json()
         except Exception as e:
+            if final_text:
+                return final_text
             if log_fn:
-                log_fn("ERR", f"Ollama 호출 실패: {e}")
-            return final_text or f"죄송합니다, {USER_DISPLAY_NAME}. 로컬 AI 연결에 실패했습니다."
+                log_fn("WARN", f"Ollama 호출 실패 → 오프라인으로 되돌림: {e}")
+            try:
+                from runtime_backtrack import ollama_failure_reply
+                return ollama_failure_reply(user_text, e)
+            except Exception:
+                return f"죄송합니다, {USER_DISPLAY_NAME}. 로컬 AI 연결에 실패했습니다."
 
         msg = data.get("message") or {}
         content = (msg.get("content") or "").strip()

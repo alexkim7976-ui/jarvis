@@ -14,18 +14,17 @@ from campus_agent import (
 
 def test_default_mail_account():
     os.environ.pop("CAMPUS_GMAIL_ACCOUNT", None)
-    # 모듈 상수는 import 시점 값 — env override 테스트는 monkeypatch로
-    assert campus_mail_account()  # 기본값 존재
+    assert campus_mail_account() == ""
 
 
 def test_message_for_campus_account_match(monkeypatch):
-    monkeypatch.setenv("CAMPUS_GMAIL_ACCOUNT", "taehyeon.kim.2@stonybrook.org")
+    monkeypatch.setenv("CAMPUS_GMAIL_ACCOUNT", "student@example.edu")
     import importlib
     import campus_agent as ca
     importlib.reload(ca)
 
     meta = {
-        "to": "Kim Taehyeon <taehyeon.kim.2@stonybrook.org>",
+        "to": "Student <student@example.edu>",
         "cc": "",
         "delivered_to": "",
     }
@@ -33,7 +32,7 @@ def test_message_for_campus_account_match(monkeypatch):
 
 
 def test_message_for_campus_account_rejects_other(monkeypatch):
-    monkeypatch.setenv("CAMPUS_GMAIL_ACCOUNT", "taehyeon.kim.2@stonybrook.org")
+    monkeypatch.setenv("CAMPUS_GMAIL_ACCOUNT", "student@example.edu")
     import importlib
     import campus_agent as ca
     importlib.reload(ca)
@@ -47,12 +46,12 @@ def test_message_for_campus_account_rejects_other(monkeypatch):
 
 
 def test_build_query_includes_recipient(monkeypatch):
-    monkeypatch.setenv("CAMPUS_GMAIL_ACCOUNT", "taehyeon.kim.2@stonybrook.org")
+    monkeypatch.setenv("CAMPUS_GMAIL_ACCOUNT", "student@example.edu")
     import importlib
     import campus_agent as ca
     importlib.reload(ca)
 
     agent = ca.CampusAgent()
     q = agent._build_query()
-    assert "taehyeon.kim.2@stonybrook.org" in q
+    assert "student@example.edu" in q
     assert "deliveredto:" in q or "to:" in q

@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from resource_profile import is_low_mem, stt_process_enabled
+from runtime_backtrack import describe_error, main_uses_cpu
 
 _worker_model = None
 _process_pool: ProcessPoolExecutor | None = None
@@ -21,6 +22,7 @@ _wake_process_pool: ProcessPoolExecutor | None = None
 _pool_lock = threading.Lock()
 _stt_last_warn = 0.0
 _stt_warn_interval = 30.0
+_process_disabled = False
 
 
 def _log(level: str, msg: str) -> None:
@@ -56,6 +58,8 @@ def resolve_stt_mode(openai_api_key: str = "") -> str:
 
 
 def use_process_pool() -> bool:
+    if _process_disabled or main_uses_cpu():
+        return False
     return resolve_stt_mode() == "local" and stt_process_enabled()
 
 
@@ -110,6 +114,13 @@ def shutdown_process_pool() -> None:
                     pool.shutdown(wait=False)
         _process_pool = None
         _wake_process_pool = None
+
+
+def _retire_process_pool() -> None:
+    """워커가 빈 오류로 죽으면 풀을 버리고, 이후에는 맥 CPU에서만 인식한다."""
+    global _process_disabled
+    _process_disabled = True
+    shutdown_process_pool()
 
 
 def transcribe_audio_api(wav_path: str, client, language: str = "ko") -> str:
@@ -178,7 +189,8 @@ def transcribe_audio(
             pool = _get_process_pool()
             return pool.submit(_worker_transcribe, wav_path, language).result(timeout=120)
         except Exception as e:
-            _log_warn_throttled(f"프로세스 STT 실패 → 인프로세스 폴백: {e}")
+            _retire_process_pool()
+            _log_warn_throttled(f"프로세스 STT 실패 → 맥 CPU로 되돌림: {describe_error(e)}")
 
     return transcribe_audio_local(wav_path, role=role, language=language)
 
@@ -253,7 +265,8 @@ def transcribe_wake_clip(
                 return True, True, text
             return False, True, text
         except Exception as e:
-            _log_warn_throttled(f"웨이크 프로세스 STT 실패 → 인프로세스 폴백: {e}")
+            _retire_process_pool()
+            _log_warn_throttled(f"웨이크 프로세스 STT 실패 → 맥 CPU로 되돌림: {describe_error(e)}")
 
     try:
         from whisper_pool import get_whisper_model

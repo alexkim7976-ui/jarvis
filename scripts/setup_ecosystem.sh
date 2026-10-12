@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# JARVIS 생태계 원클릭 설정 — 김태현이 수동으로 할 작업 전부 자동화
+# JARVIS 생태계 원클릭 설정 — 수동 설정을 자동화
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

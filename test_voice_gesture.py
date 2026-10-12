@@ -27,3 +27,40 @@ def test_handler_pause_and_cooldown():
     assert calls["confirm"] == 1
 
     assert h.handle("NONE", cooldown_sec=0) is False
+
+
+def test_point_starts_command_once_until_release():
+    calls = {"start": 0, "stop": 0}
+
+    h = VoiceGestureHandler(
+        on_pause=lambda: None,
+        on_mute=lambda: None,
+        on_confirm=lambda: None,
+        on_command_start=lambda: calls.__setitem__("start", calls["start"] + 1) or True,
+        on_command_stop=lambda: calls.__setitem__("stop", calls["stop"] + 1) or True,
+    )
+    h.observe("POINT")
+    assert h.handle("POINT", cooldown_sec=0) is True
+    h.observe("POINT")
+    assert h.handle("POINT", cooldown_sec=0) is False
+    assert calls["start"] == 1
+
+    h.observe("NONE")
+    h.observe("PEACE")
+    assert h.handle("PEACE", cooldown_sec=0) is True
+    assert calls["stop"] == 1
+
+
+def test_command_gestures_work_when_voice_gestures_disabled(monkeypatch):
+    monkeypatch.setenv("JARVIS_VOICE_GESTURES", "0")
+    started = {"n": 0}
+    h = VoiceGestureHandler(
+        on_pause=lambda: None,
+        on_mute=lambda: None,
+        on_confirm=lambda: None,
+        on_command_start=lambda: started.__setitem__("n", started["n"] + 1) or True,
+    )
+    assert h.handle("OPEN", cooldown_sec=0) is False
+    assert h.handle("POINT", cooldown_sec=0) is True
+    assert started["n"] == 1
+

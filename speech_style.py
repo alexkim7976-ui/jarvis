@@ -6,11 +6,11 @@ from __future__ import annotations
 import os
 import re
 
-USER_DISPLAY_NAME = (os.getenv("JARVIS_USER_NAME") or "김태현").strip() or "김태현"
+USER_DISPLAY_NAME = (os.getenv("JARVIS_USER_NAME") or "사용자").strip() or "사용자"
 
 USER_NAME_RULES = f"""
 - 사용자 이름: {USER_DISPLAY_NAME}. 부를 때는 반드시 "{USER_DISPLAY_NAME}"만 사용.
-- "토니", "Tony", "선생님", "태현"(단독 호칭) 절대 금지.
+- 별명, 성만 단독으로 부르는 호칭, "토니", "Tony", "선생님"은 쓰지 말 것.
 """
 
 VOICE_STYLE_INSTRUCTIONS = f"""
@@ -24,7 +24,7 @@ VOICE_STYLE_INSTRUCTIONS = f"""
   "근데 변동성은 조금 큰 편이에요."
 - 접속: 근데, 그래서, 일단, 솔직히, 아마, 오히려 — 필요할 때만 가볍게.
 - 문장 2~4개, 짧게 끊어서. 숫자는 구어체 (7만 2천 원, 3퍼센트 정도).
-- 호칭은 "{USER_DISPLAY_NAME}"만 (0~1회). "선생님", "토니", "Tony", "태현" 금지.
+- 호칭은 "{USER_DISPLAY_NAME}"만 (0~1회). "선생님", "토니", "Tony" 금지.
 - 번호 목록·불릿·JSON·함수명·영문 기술 용어는 말하지 말 것.
 - "처리 완료", "브리핑", "분석 결과는 다음과 같습니다" 같은 딱딱한 표현 금지.
 - 영어 문장 구조를 한국어로 옮긴 느낌 금지 (예: "현재 주가는 ~입니다" → "지금 주가는 ~ 정도예요").
@@ -167,7 +167,7 @@ def _is_mostly_korean(text: str) -> bool:
 
 
 def normalize_user_address(text: str) -> str:
-    """토니·선생님·태현 등 잘못된 호칭 → USER_DISPLAY_NAME."""
+    """토니·선생님 같은 잘못된 호칭 → 로그인한 이름."""
     if not text or not str(text).strip():
         return text or ""
     name = USER_DISPLAY_NAME
@@ -175,7 +175,6 @@ def normalize_user_address(text: str) -> str:
     t = re.sub(r"토니(?=[,，.\s]|$)", name, t)
     t = re.sub(r"Tony(?=[,，.\s]|$)", name, t, flags=re.I)
     t = re.sub(r"선생님", name, t)
-    t = re.sub(rf"(?<![가-힣])태현(?=[,，.\s]|$)", name, t)
     t = re.sub(rf"({re.escape(name)}[,，]\s*){{2,}}", f"{name}, ", t)
     return t
 

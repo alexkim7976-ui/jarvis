@@ -19,7 +19,13 @@ def ollama_accuracy_options(extra: dict | None = None) -> dict:
     num_predict = os.getenv("OLLAMA_NUM_PREDICT", "1536")
     if num_predict.isdigit():
         opts["num_predict"] = int(num_predict)
-    num_gpu = int(os.getenv("OLLAMA_NUM_GPU", "-1"))
+    num_gpu = 0
+    try:
+        from runtime_backtrack import main_uses_cpu
+        if not main_uses_cpu():
+            num_gpu = int(os.getenv("OLLAMA_NUM_GPU", "0"))
+    except ImportError:
+        num_gpu = int(os.getenv("OLLAMA_NUM_GPU", "0"))
     if num_gpu != 0:
         opts["num_gpu"] = num_gpu
     if extra:

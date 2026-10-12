@@ -1,5 +1,8 @@
 from __future__ import annotations
 import os, sys, time, wave, json, queue, struct, shutil, re
+os.environ.setdefault("GLOG_minloglevel", "2")
+os.environ.setdefault("ABSL_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 import threading, subprocess
 import warnings
 from pathlib import Path
@@ -10,6 +13,22 @@ from datetime import datetime
 #  - protobuf의 SymbolDatabase.GetPrototype() deprecated UserWarning
 warnings.filterwarnings("ignore", message="invalid value encountered in matmul")
 warnings.filterwarnings("ignore", message=".*SymbolDatabase.GetPrototype.*")
+warnings.filterwarnings("ignore", message=".*pkg_resources is deprecated.*")
+
+# 로그인으로 이름·메일을 넣은 뒤에 나머지 모듈이 그 값을 읽게 한다.
+from dotenv import load_dotenv
+_early_data = (os.getenv("JARVIS_DATA_DIR") or "").strip()
+if _early_data and Path(_early_data, ".env").is_file():
+    load_dotenv(Path(_early_data) / ".env")
+else:
+    load_dotenv()
+if (
+    __name__ == "__main__"
+    and "--test-telegram" not in sys.argv
+    and os.getenv("JARVIS_SKIP_LOGIN", "").strip().lower() not in ("1", "true", "yes", "on")
+):
+    from user_account import ensure_login
+    ensure_login()
 
 import cv2, numpy as np, pyaudio, requests
 import mediapipe as mp
@@ -38,6 +57,13 @@ from speech_gate import (begin_speech, end_speech, wait_audio_idle,
                          speech_active, reset_speech_gate)
 from gesture_control import GestureController
 from voice_gesture import VoiceGestureHandler, detect_from_landmarks, voice_gestures_enabled
+from screen_keyboard import ScreenKeyboard
+from screen_help import draw_help
+from background_control import (
+    BACKGROUND_TOOLS, BACKGROUND_TOOL_NAMES, bind_task, draw_background_panel,
+    execute_background_tool, interpret_control_command, is_enabled,
+)
+from interest_prefetch import prefetch_running, start_prefetch, stop_prefetch
 from background_monitor import (BackgroundMonitor, MONITOR_TOOLS,
                                 execute_monitor_tool, set_monitor_instance,
                                 MONITOR_INTERVAL)
@@ -107,6 +133,7 @@ from media_tools import (
 from media_pipeline import create_media_runtime, init_media_runtime
 from stt_backend import resolve_stt_mode, shutdown_process_pool
 from free_mode import apply_free_mode_defaults, free_only_enabled, free_mode_summary
+from runtime_backtrack import apply_runtime_policy, offline_reply
 from free_mode import openai_client_for_stt, use_paid_tts
 from local_tts import synthesize_macos
 from mac_control import MAC_CONTROL_TOOLS, execute_mac_control_tool
@@ -123,6 +150,7 @@ if _data_dir and Path(_data_dir, ".env").is_file():
 else:
     load_dotenv()
 apply_free_mode_defaults()
+apply_runtime_policy()
 
 # faster-whisper 모델은 whisper_pool.get_whisper_model()이 공용 인스턴스로 관리 (웨이크워드와 공유)
 
@@ -153,7 +181,7 @@ FACE_CHECK_INTERVAL=int(os.getenv("FACE_CHECK_INTERVAL","15"))
 PLAY_TIMEOUT=float(os.getenv("JARVIS_PLAY_TIMEOUT","180"))  # afplay 등 재생 프로세스 최대 대기(초)
 # 메인 루프 FPS — resource_profile.main_loop_fps() (LOW_MEM 기본 15, 일반 30)
 
-ALL_TOOLS = FILE_TOOLS + MAC_CONTROL_TOOLS + SEARCH_TOOLS + DISPLAY_TOOLS + FACE_TOOLS + WEATHER_TOOLS + SYSTEM_MONITOR_TOOLS + CALENDAR_TOOLS + MONITOR_TOOLS + STOCK_QUANT_TOOLS + NEWS_TOOLS + PORTFOLIO_TOOLS + BACKTEST_TOOLS + PRICE_ALERT_TOOLS + WHALE_TOOLS + SOCIAL_TOOLS + FORECAST_TOOLS + IR_TOOLS + MEDIA_TOOLS + STOCK_MONITOR_TOOLS + CAMPUS_TOOLS + SUPPLY_CHAIN_TOOLS + CROSSVAL_TOOLS + OPENCLAW_TOOLS
+ALL_TOOLS = FILE_TOOLS + MAC_CONTROL_TOOLS + SEARCH_TOOLS + DISPLAY_TOOLS + FACE_TOOLS + WEATHER_TOOLS + SYSTEM_MONITOR_TOOLS + CALENDAR_TOOLS + MONITOR_TOOLS + STOCK_QUANT_TOOLS + NEWS_TOOLS + PORTFOLIO_TOOLS + BACKTEST_TOOLS + PRICE_ALERT_TOOLS + WHALE_TOOLS + SOCIAL_TOOLS + FORECAST_TOOLS + IR_TOOLS + MEDIA_TOOLS + STOCK_MONITOR_TOOLS + CAMPUS_TOOLS + SUPPLY_CHAIN_TOOLS + CROSSVAL_TOOLS + OPENCLAW_TOOLS + BACKGROUND_TOOLS
 FILE_TOOL_NAMES    = {t["function"]["name"] for t in FILE_TOOLS}
 MAC_CONTROL_TOOL_NAMES = {t["function"]["name"] for t in MAC_CONTROL_TOOLS}
 SEARCH_TOOL_NAMES  = {t["function"]["name"] for t in SEARCH_TOOLS}
@@ -192,7 +220,7 @@ def warnings_screen_only():
     기본 ON. JARVIS_WARN_SCREEN_ONLY=0 으로 끄면 기존처럼 음성으로도 브리핑."""
     return os.getenv("JARVIS_WARN_SCREEN_ONLY", "1").strip().lower() not in ("0", "false", "off")
 
-def execute_any_tool(name, args):
+def _dispatch_tool(name, args):
     # ── 보안 게이트 ──
     if not tool_rate_limiter.allow():
         log("WARN", f"⛔ 속도 제한 초과 — 도구 호출 차단: {name}")
@@ -401,7 +429,26 @@ def execute_any_tool(name, args):
         return execute_openclaw_tool(name, args)
     if name in CROSSVAL_TOOL_NAMES:
         return execute_crossval_tool(name, args)
+    if name in BACKGROUND_TOOL_NAMES:
+        return execute_background_tool(name, args)
     return {"success":False,"message":f"Unknown tool: {name}"}
+
+
+def execute_any_tool(name, args):
+    """그 외 작업은 백엔드 → 맥 CPU → 오프라인 순으로 되돌린다."""
+    from runtime_backtrack import call_tool_backend, guard_tool
+
+    def _backend():
+        safe, reason, clean = sanitize_tool_args(name, args)
+        if not safe:
+            return {"success": False, "message": f"보안 검증 실패: {reason}"}
+        d_ok, d_reason = guard_destructive_tool(name, clean)
+        if not d_ok:
+            return {"success": False, "message": f"보안 차단: {d_reason}"}
+        return call_tool_backend(name, clean)
+
+    return guard_tool(name, args, lambda: _dispatch_tool(name, args), log_fn=log, backend=_backend)
+
 
 JARVIS_SYSTEM_PROMPT = """You are J.A.R.V.I.S., a personal AI assistant. All replies are spoken aloud in Korean.
 """ + USER_NAME_RULES + VOICE_STYLE_INSTRUCTIONS + """
@@ -449,8 +496,8 @@ TOOLS:
 ★ CAMPUS AGENT: 사용자가 "학사 일정 알려줘", "수강신청 언제야", "다가오는 데드라인 뭐 있어" → check_upcoming_academic_schedule(days=60).
   "캠퍼스 감시 상태", "스토니브룩 메일 왔어?" → refresh_campus_agent_status.
   결과 표(overlay_table)는 시스템이 자동 투사. 반환된 message를 그대로(1~2문장) 음성 답변으로 사용.
-  백그라운드가 10분마다 Gmail을 감시하되, taehyeon.kim.2@stonybrook.org 로 온 스토니브룩 행정 메일(VIS·I-20/비자·SOLAR Hold·수강신청·기숙사)만
-  포착·음성 안내합니다. 다른 개인 메일함은 절대 보고하지 않습니다.
+  백그라운드가 10분마다 Gmail을 감시하되, 로그인에서 등록한 학교 메일로 온 행정 메일(VIS·I-20/비자·SOLAR Hold·수강신청·기숙사)만
+  포착·음성 안내합니다. 메일 주소가 없으면 감시하지 않습니다. 다른 개인 메일함은 보고하지 않습니다.
 
 ★ STOCK MONITOR: 사용자가 "엔비디아 5% 이상 폭락하면 알려줘" → add_stock_alert(ticker="NVDA", condition_type="change_pct_down", threshold=5).
   "삼성전자 5만원 아래로 떨어지면 알림" → add_stock_alert(ticker="005930.KS", condition_type="price_below", threshold=50000).
@@ -1166,7 +1213,10 @@ def ask_jarvis_ollama_chat_only(text: str, history: list, pipeline=None) -> str:
         r.raise_for_status()
     except Exception as e:
         log("ERR", f"Ollama 호출 실패: {e}")
-        return "죄송합니다. 현재 온라인·오프라인 LLM 모두 사용할 수 없습니다."
+        local = offline_reply(text)
+        if local:
+            return local
+        return "로컬 AI에 연결하지 못했습니다. 시간, 시스템 상태, 파일, 일정, 소리 조절은 오프라인으로 계속 됩니다."
 
     if pipeline:
         pipeline.start()
@@ -1793,6 +1843,8 @@ def main():
         log("INFO","음성 프로필: 미학습 → V키로 음성 5회 수집")
         log("INFO","→ 학습 전: 주먹/스페이스/웨이크워드 모두 사용 가능")
     log("INFO",f"제스처 마우스: G키로 ON/OFF (☝이동 🤏클릭 ✌스크롤 👍볼륨)")
+    log("INFO","손짓 명령: 검지 유지 → 녹음 시작 · 브이 유지 → 전송 (G키 마우스 OFF일 때)")
+    log("INFO","화면 키보드: Enter 또는 / · 맥 입력기는 영어, 글자는 한글 두벌식 · Tab 한/영")
     log("INFO",f"차트 비전 분석: S키 — 웹캠에 차트를 비추고 누르면 기술적 분석 브리핑")
     log("INFO",f"백그라운드: GitHub={'ON' if bg_monitor.github_enabled else 'OFF'} | "
                f"PlayStore={'ON' if bg_monitor.playstore_enabled else 'OFF'} | "
@@ -1829,12 +1881,13 @@ def main():
         log("INFO", f"Apple Silicon 프로파일: STT프로세스={'ON' if _perf['stt_process'] else 'OFF'}"
                    f" | 워커순차기동={'ON' if _perf['stagger_workers'] else 'OFF'}"
                    f"({_perf['worker_stagger_sec']:.0f}s)"
-                   f" | Whisper=auto→MLX(Metal)")
+                   f" | Whisper=CPU")
+    log("INFO", "실행 경로: 메인=맥북 CPU · 그 외=백엔드 후 CPU로 백트래킹 · 시간·시스템·파일·일정·소리는 오프라인")
     log("INFO", f"대화 컨텍스트: 최근 {context_turn_limit()}턴 / 요약={'ON' if os.getenv('JARVIS_HISTORY_SUMMARIZE','1').strip() not in ('0','false','off') else 'OFF'}")
     try:
         from wake_engine import wake_engine_mode, oww_enabled
         _we = wake_engine_mode()
-        log("INFO", f"웨이크워드 엔진: {_we} | openWakeWord={'ON' if oww_enabled() else 'OFF'} | STT=MLX Whisper")
+        log("INFO", f"웨이크워드 엔진: {_we} | openWakeWord={'ON' if oww_enabled() else 'OFF'} | STT=CPU Whisper")
     except ImportError:
         pass
     try:
@@ -1883,6 +1936,9 @@ def main():
     _sel_result_q=queue.Queue()  # 종목 직접입력(타이핑) 결과 메시지 — 메인 루프가 음성 안내
     _text_cmd_q=queue.Queue()    # T키 타이핑 명령(터미널 입력) → 메인 루프가 IDLE에서 처리
     typing_input={"active":False, "proc":None}  # 타이핑 팝업 입력창 상태 (중복 방지 + 종료 정리)
+    screen_kb = ScreenKeyboard()
+    show_help = {"on": True}
+    show_bg = {"on": False}
     # 종목명 오인식 → 후보 선택 대기 상태 (음성 번호 1~5 / 6=직접 타이핑)
     pending_sel={"active":False, "ctx":None, "await_record":False, "rearm":False, "retries":0}
     # 얼굴 인식 워커 — 저사양 시 스레드 미생성
@@ -1896,36 +1952,44 @@ def main():
     # 웨이크워드 감지 시작 (별도 마이크 스트림) — 즉시 기동
     wake.start(recorder.pa)
 
-    def _start_background_workers():
-        """백그라운드 워커 순차 기동 — 부팅 시 CPU/RAM 스파이크 완화."""
+    bind_task("prefetch", start_prefetch, stop_prefetch, prefetch_running)
+    bind_task("github", bg_monitor.start, bg_monitor.stop, lambda: bg_monitor._running)
+    bind_task("news", news_analyzer.start, news_analyzer.stop, lambda: news_analyzer._running)
+    bind_task("price", price_alert.start, price_alert.stop, lambda: price_alert._running)
+    bind_task("whale", whale_tracker.start, whale_tracker.stop, lambda: whale_tracker._running)
+    bind_task("social", social_detector.start, social_detector.stop, lambda: social_detector._running)
+    bind_task("stock", stock_monitor.start, stock_monitor.stop, lambda: stock_monitor._running)
+    bind_task("campus", campus_agent.start, campus_agent.stop, lambda: campus_agent._running)
+
+    def _start_background_workers(stagger=True):
+        """백그라운드 워커 순차 기동 — 꺼 둔 작업은 시작하지 않는다."""
         workers = [
-            ("GitHub/PlayStore", bg_monitor.start),
-            ("뉴스", news_analyzer.start),
-            ("지정가", price_alert.start_price_alert_worker),
-            ("고래", whale_tracker.start),
-            ("소셜", social_detector.start),
-            ("주가", stock_monitor.start),
-            ("캠퍼스", campus_agent.start),
+            ("prefetch", "관심 미리받기", start_prefetch),
+            ("github", "GitHub/PlayStore", bg_monitor.start),
+            ("news", "뉴스", news_analyzer.start),
+            ("price", "지정가", price_alert.start),
+            ("whale", "고래", whale_tracker.start),
+            ("social", "소셜", social_detector.start),
+            ("stock", "주가", stock_monitor.start),
+            ("campus", "캠퍼스", campus_agent.start),
         ]
-        delay = worker_stagger_seconds()
-        for name, fn in workers:
+        delay = worker_stagger_seconds() if stagger else 0
+        for key, name, fn in workers:
+            if not is_enabled(key):
+                log("INFO", f"백그라운드 워커({name}) 꺼짐 — 사용자 설정")
+                continue
             try:
                 fn()
             except Exception as e:
                 log("WARN", f"백그라운드 워커({name}) 기동 실패: {e}")
-            time.sleep(delay)
+            if delay:
+                time.sleep(delay)
 
     if stagger_workers_enabled():
         threading.Thread(target=_start_background_workers, daemon=True, name="worker-stagger").start()
         log("INFO", f"백그라운드 워커 순차 기동 예약 (간격 {worker_stagger_seconds():.0f}초)")
     else:
-        bg_monitor.start()
-        news_analyzer.start()
-        price_alert.start_price_alert_worker()
-        whale_tracker.start()
-        social_detector.start()
-        stock_monitor.start()
-        campus_agent.start()
+        _start_background_workers(stagger=False)
 
     # 선제적 매크로 가드레일 감시 — IDLE 중 '위험' 격상 시 먼저 음성 브리핑
     macro_guard = MacroGuardWatcher(status_fn=get_macro_market_status,
@@ -1966,10 +2030,26 @@ def main():
             chat_log.add("system", "5초 정적 → 자동 종료 | 소음 필터링 활성")
         else:
             chat_log.add("system", "V키로 음성 5회 수집 → 주인 전용 모드 활성화")
+    chat_log.add("system", "⌨ Enter 또는 / : 화면에 키보드 입력 (맥 입력기는 영어, 글자는 한글)")
+    chat_log.add("system", "B키  백그라운드 켜기/끄기  ·  관심 추가 주제  ·  뉴스 백그라운드 꺼")
+    chat_log.add("system", "☝ 검지를 유지하면 손짓 명령 · ✌ 브이를 유지하면 전송")
 
     # 스트리밍 TTS 파이프라인
     tts_pipeline = StreamingTTSPipeline()
     tts_pipeline.set_player(player)
+
+    def _reply_control(clean):
+        reply = interpret_control_command(clean)
+        if not reply:
+            return False
+        chat_log.add("user", clean)
+        chat_log.add("jarvis", reply)
+        try:
+            speak_text(reply)
+        except Exception as e:
+            log("WARN", f"백그라운드 제어 음성 실패: {e}")
+        result_q.put(("OK", clean, reply, None))
+        return True
 
     def process_async(wav):
         """STT → 스트리밍 LLM → 실시간 TTS"""
@@ -1981,6 +2061,8 @@ def main():
                 chat_log.add("system", f"⛔ 입력 차단: {reason}")
                 log("WARN", f"음성 입력 차단: {reason}")
                 result_q.put(("ERROR", "", ""))
+                return
+            if _reply_control(clean):
                 return
             chat_log.add("user", clean)
             acknowledge()  # "이해했고 수행하겠습니다" 먼저 말하고 처리
@@ -2016,6 +2098,8 @@ def main():
                 chat_log.add("system", f"⛔ 입력 차단: {reason}")
                 log("WARN", f"타이핑 입력 차단: {reason}")
                 result_q.put(("ERROR", "", ""))
+                return
+            if _reply_control(clean):
                 return
             chat_log.add("user", clean)
             acknowledge()  # "이해했고 수행하겠습니다" 먼저 말하고 처리
@@ -2413,11 +2497,48 @@ def main():
         except Exception as e:
             log("WARN", f"제스처 미디어 토글 실패: {e}")
 
+    def _gesture_command_start() -> bool:
+        """검지 유지 → 웨이크워드 없이 음성 명령 녹음."""
+        nonlocal state
+        if state != "IDLE" or player.is_playing or tts_pipeline.is_playing or recorder._recording:
+            return False
+        if voice_auth_required() and voice_setup_required(wake.voice_profile):
+            chat_log.add("system", "🔒 최대 보안 — V키로 음성 등록 후 손짓 명령 가능")
+            return True
+        state = "RECORDING"
+        chat_log.add("system", "☝ 손짓 명령 — 말씀하세요 (브이로 전송, 3초 정적도 전송)")
+        _begin_recording("손짓 명령 녹음 시작")
+        return True
+
+    def _gesture_command_stop() -> bool:
+        """브이 유지 → 녹음을 끝내고 명령으로 보낸다."""
+        nonlocal state
+        if state != "RECORDING":
+            return False
+        state = "PROCESSING"
+        try:
+            wav = recorder.stop()
+        except Exception as e:
+            log("WARN", f"손짓 명령 종료 실패: {e}")
+            state = "IDLE"
+            wake.resume()
+            return True
+        if wav:
+            chat_log.add("system", "✌ 손짓 — 명령 전송")
+            dispatch_processing(wav)
+        else:
+            state = "IDLE"
+            wake.resume()
+            chat_log.add("system", "✌ 녹음이 비어 명령을 보내지 않았습니다")
+        return True
+
     vg_handler = VoiceGestureHandler(
         on_pause=_gesture_pause,
         on_mute=_gesture_mute,
         on_confirm=_gesture_confirm,
         on_play_pause=_gesture_play_pause,
+        on_command_start=_gesture_command_start,
+        on_command_stop=_gesture_command_stop,
         log_fn=log,
     )
 
@@ -2503,7 +2624,8 @@ def main():
             if cg==last_gesture: gesture_hold=min(gesture_hold+1,GESTURE_THRESHOLD+5)
             else: gesture_hold=0; last_gesture=cg
             gc=gesture_hold>=GESTURE_THRESHOLD
-            if _vision_on and gc and not gesture_ctrl.enabled and voice_gestures_enabled():
+            vg_handler.observe(cg)
+            if _vision_on and gc and not gesture_ctrl.enabled:
                 if vg_handler.handle(cg):
                     gesture_hold = 0
                     last_gesture = "NONE"
@@ -3071,6 +3193,9 @@ def main():
             overlay.set_theme(_macro_level); _hud_theme_level=_macro_level
             log("INFO", f"HUD 테마 전환 → {_macro_level}")
         frame=overlay.render(frame)
+        frame=screen_kb.draw(frame)
+        frame=draw_background_panel(frame, show_bg["on"])
+        frame=draw_help(frame, show_help["on"])
 
         # ── JARVIS Link: HUD/매트릭스/레이더 실시간 모바일 스트리밍(스로틀 ≈4Hz) ──
         _now=time.time()
@@ -3120,7 +3245,26 @@ def main():
         key=cv2.waitKey(1)&0xFF
         if key not in (255, 0):
             idle_tracker.touch()
-        if key==ord("q") or key==27:
+        if screen_kb.active and key not in (255, 0):
+            _typed_line = screen_kb.feed(key)
+            if _typed_line is None:
+                pass
+            elif _typed_line:
+                _text_cmd_q.put(_typed_line)
+                chat_log.add("system", f"⌨ 화면 입력 전송: {_typed_line[:80]}")
+            else:
+                chat_log.add("system", "⌨ 화면 입력 취소")
+        elif key in (13, 10, ord("/")):
+            if state == "IDLE" and not player.is_playing and not tts_pipeline.is_playing:
+                screen_kb.open()
+                chat_log.add("system", "⌨ 화면 입력 — 맥 입력기를 영어로 두면 한글로 조합됩니다 (Tab 한/영, Enter 전송, Esc 취소)")
+            else:
+                chat_log.add("system", "⌨ 대기 중일 때만 화면에 입력할 수 있습니다")
+        elif key in (ord("h"), ord("H")):
+            show_help["on"] = not show_help["on"]
+        elif key in (ord("b"), ord("B")):
+            show_bg["on"] = not show_bg["on"]
+        elif key==ord("q") or key==27:
             tts_pipeline.stop()
             if player.is_playing: player.stop()
             break

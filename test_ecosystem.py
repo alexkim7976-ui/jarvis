@@ -27,7 +27,7 @@ def test_mobile_inbound_queue():
     from jarvis_link import JarvisLink
     link = JarvisLink(token="test-token-fixed-for-unit")
     evt = link._enqueue_mobile_inbound(
-        {"type": "notification", "title": "KakaoTalk", "body": "김태현님 안녕하세요"},
+        {"type": "notification", "title": "KakaoTalk", "body": "안녕하세요"},
         source="test",
     )
     assert evt.get("read_aloud") is True

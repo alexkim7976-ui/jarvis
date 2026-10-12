@@ -176,7 +176,7 @@ class FaceRecognizer:
                     except Exception:
                         h = datetime.now().hour
                         greet = "좋은 아침입니다" if h < 12 else ("안녕하세요" if h < 18 else "좋은 저녁입니다")
-                    display = USER_DISPLAY_NAME if name in ("Owner", "Boss", "태현", "김태현") else name
+                    display = USER_DISPLAY_NAME if name in ("Owner", "Boss") else name
                     greeting = f"{greet}, {display}."
                     self.events.append({
                         "type": "greet",

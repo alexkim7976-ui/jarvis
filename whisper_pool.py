@@ -50,6 +50,12 @@ def _low_mem() -> bool:
 
 
 def _backend() -> str:
+    try:
+        from runtime_backtrack import main_uses_cpu
+        if main_uses_cpu():
+            return "faster"
+    except ImportError:
+        pass
     b = os.getenv("JARVIS_WHISPER_BACKEND", "auto").strip().lower()
     if b in ("faster", "ctranslate2", "ct2"):
         return "faster"
@@ -145,7 +151,11 @@ def get_whisper_model(size: str | None = None, *, role: str = "main"):
         backend = "faster"
 
     compute = os.getenv("JARVIS_WHISPER_COMPUTE", "int8")
-    device = os.getenv("JARVIS_WHISPER_DEVICE", "cpu")
+    try:
+        from runtime_backtrack import main_uses_cpu
+        device = "cpu" if main_uses_cpu() else os.getenv("JARVIS_WHISPER_DEVICE", "cpu")
+    except ImportError:
+        device = os.getenv("JARVIS_WHISPER_DEVICE", "cpu")
     key = ("faster", size, compute, device)
     with _lock:
         model = _models.get(key)

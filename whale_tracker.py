@@ -15,7 +15,7 @@ J.A.R.V.I.S — Whale / 13F / Politician Trade Tracker
   WHALE_WATCHLIST=buffett,pelosi
   WHALE_ALERT_INTERVAL=86400
   WHALE_SELL_ALERT_USD=1000000
-  SEC_USER_AGENT="Jarvis taehyeonkim@example.com"
+  SEC_USER_AGENT="JARVIS research local@localhost"
 """
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ QUIVER_API_KEY = os.getenv("QUIVER_API_KEY", "")
 WHALE_WATCHLIST = [x.strip() for x in os.getenv("WHALE_WATCHLIST", "buffett,pelosi").split(",") if x.strip()]
 WHALE_ALERT_INTERVAL = int(os.getenv("WHALE_ALERT_INTERVAL", "86400"))
 WHALE_SELL_ALERT_USD = float(os.getenv("WHALE_SELL_ALERT_USD", "1000000"))
-SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "Jarvis Research taehyeonkim@example.com")
+SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "JARVIS research local@localhost")
 
 BIG_TECH = {"AAPL", "MSFT", "NVDA", "GOOGL", "GOOG", "AMZN", "META", "TSLA"}
 
