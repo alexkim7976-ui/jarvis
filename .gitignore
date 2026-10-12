@@ -82,3 +82,9 @@ bin/jarvis_tts
 # 출시 앱·DMG 빌드 산출물 (scripts/build_release_app.sh)
 dist/
 JARVIS.app/
+
+# 로컬 런타임 데이터/캐시
+.jarvis_path
+.matplotlib/
+data/jarvis_memory.db
+data/campus_schedule.json
