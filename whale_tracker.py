@@ -244,7 +244,6 @@ def _fetch_house_trades(person: str, display_name: str) -> list[dict]:
     """HouseStockWatcher 공개 API 폴백."""
     urls = [
         "https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json",
-        "https://housestockwatcher.com/api",
     ]
     for url in urls:
         try:

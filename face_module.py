@@ -37,6 +37,7 @@ class FaceRecognizer:
         # 인사/경고 쿨다운 (같은 사람에게 반복 안 하도록)
         self._greeted = {}        # {name: timestamp}
         self._warned_unknown = 0  # 마지막 경고 시각
+        self._unknown_streak = 0  # 등록 얼굴 없이 Unknown이 이어진 프레임 수
         self.GREET_COOLDOWN = 300     # 5분 쿨다운
         self.UNKNOWN_COOLDOWN = 60    # 1분 쿨다운
 
@@ -152,10 +153,17 @@ class FaceRecognizer:
 
         self.last_results = results
         now = time.time()
+        known_present = any(name not in ("Unknown", "Detected") for name, _loc in results)
+        if known_present or not any(name == "Unknown" for name, _loc in results):
+            self._unknown_streak = 0
+        else:
+            self._unknown_streak += 1
 
         for name, location in results:
             if name == "Unknown":
-                # 모르는 사람 경고
+                # 등록된 얼굴이 같이 있거나, 한두 프레임만 놓친 경우에는 경고하지 않는다.
+                if known_present or self._unknown_streak < 3:
+                    continue
                 if now - self._warned_unknown > self.UNKNOWN_COOLDOWN:
                     self._warned_unknown = now
                     self.events.append({
@@ -164,7 +172,10 @@ class FaceRecognizer:
                         "message": f"{USER_DISPLAY_NAME}, 등록되지 않은 인물이 감지되었습니다. 주의가 필요합니다.",
                     })
                     self._log("FACE", "⚠ 미등록 인물 감지")
+                    break
             else:
+                if name in ("Detected", ""):
+                    continue
                 # 등록된 사람 인사
                 last_greet = self._greeted.get(name, 0)
                 if now - last_greet > self.GREET_COOLDOWN:

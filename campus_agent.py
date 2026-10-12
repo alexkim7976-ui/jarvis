@@ -216,13 +216,16 @@ class CampusAgent:
         if not self.enabled:
             _log("WARN", "비활성(CAMPUS_AGENT_ENABLED=false)")
             return
+        if not campus_mail_account():
+            _log("INFO", "학교 메일이 없어 캠퍼스 감시를 시작하지 않습니다. 로그인에서 등록하세요.")
+            return
         if self._running:
             return
         self._running = True
         self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._thread.start()
         _log("OK", f"감시 시작 — 간격={self.interval}초 | 조회범위={CAMPUS_LOOKBACK_DAYS}일"
-                 f" | 수신={campus_mail_account() or '전체'}")
+                 f" | 수신={campus_mail_account()}")
 
     def stop(self):
         self._running = False
@@ -716,7 +719,7 @@ def execute_campus_tool(tool_name: str, arguments: dict) -> dict:
         st = _agent_instance.status
         acct = st.get("mail_account") or campus_mail_account()
         recent = st.get("recent_mail", [])
-        acct_label = acct or "전체"
+        acct_label = acct or "미등록"
         if recent:
             lines = "; ".join(f"[{m['category']}] {m['subject']}" for m in recent[:3])
             msg = (f"캠퍼스 감시 {'정상 작동 중' if st['services_ready'] else '폴백 모드(인증 대기)'}. "

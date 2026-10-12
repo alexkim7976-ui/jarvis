@@ -63,11 +63,21 @@ class VoiceGestureHandler:
         self._last_action = ""
         self._last_at = 0.0
         self._latch = ""
+        self._release_frames = 0
 
     def observe(self, gesture: str) -> None:
-        """매 프레임 호출. 손이 그 제스처를 떠나면 재실행을 허용한다."""
-        if gesture != self._latch:
-            self._latch = ""
+        """매 프레임 호출. 잠깐 손이 빠져도 같은 제스처를 다시 실행하지 않는다."""
+        if not self._latch or gesture == self._latch:
+            self._release_frames = 0
+            return
+        if gesture in ("NONE", ""):
+            self._release_frames += 1
+            if self._release_frames >= 8:
+                self._latch = ""
+                self._release_frames = 0
+            return
+        self._latch = ""
+        self._release_frames = 0
 
     def handle(self, gesture: str, *, cooldown_sec: float = 1.2) -> bool:
         """제스처 처리. True면 액션 실행됨."""

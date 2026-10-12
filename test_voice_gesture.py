@@ -51,6 +51,27 @@ def test_point_starts_command_once_until_release():
     assert calls["stop"] == 1
 
 
+def test_brief_drop_does_not_retrigger():
+    calls = {"start": 0}
+    h = VoiceGestureHandler(
+        on_pause=lambda: None,
+        on_mute=lambda: None,
+        on_confirm=lambda: None,
+        on_command_start=lambda: calls.__setitem__("start", calls["start"] + 1) or True,
+    )
+    h.observe("POINT")
+    assert h.handle("POINT", cooldown_sec=0) is True
+    h.observe("NONE")
+    h.observe("POINT")
+    assert h.handle("POINT", cooldown_sec=0) is False
+    assert calls["start"] == 1
+    for _ in range(8):
+        h.observe("NONE")
+    h.observe("POINT")
+    assert h.handle("POINT", cooldown_sec=0) is True
+    assert calls["start"] == 2
+
+
 def test_command_gestures_work_when_voice_gestures_disabled(monkeypatch):
     monkeypatch.setenv("JARVIS_VOICE_GESTURES", "0")
     started = {"n": 0}

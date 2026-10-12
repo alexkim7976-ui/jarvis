@@ -89,7 +89,7 @@ from ir_interpreter import (IRInterpreter, IR_TOOLS, execute_ir_tool,
 from stock_monitor import (StockMonitor, STOCK_MONITOR_TOOLS, execute_stock_monitor_tool,
                            set_stock_monitor_instance)
 from campus_agent import (CampusAgent, CAMPUS_TOOLS, execute_campus_tool,
-                          set_campus_agent_instance)
+                          set_campus_agent_instance, campus_mail_account)
 from supply_chain_module import SUPPLY_CHAIN_TOOLS, execute_supply_chain_tool
 from cross_validation import (CROSSVAL_TOOLS, CROSSVAL_TOOL_NAMES,
                               execute_crossval_tool)
@@ -1866,10 +1866,11 @@ def main():
     log("INFO","IR 통역: 대기 (start_ir_interpreter 호출 시 streamlink/ffmpeg 사용)")
     log("INFO","Media Pipeline: 대기 (submit_media_url 호출 시 streamlink/ffmpeg 캡처+전처리)")
     log("INFO",f"주가 감시: ON (동적 알림 {len(stock_monitor._rules)}개 등록됨 | {stock_monitor.interval}초 간격)")
-    log("INFO",f"캠퍼스 감시(SBU): {'ON' if campus_agent.enabled else 'OFF'}"
+    _campus_on = campus_agent.enabled and bool(campus_mail_account())
+    log("INFO",f"캠퍼스 감시(SBU): {'ON' if _campus_on else 'OFF'}"
                + (f" (Gmail/Calendar {campus_agent.interval}초 간격"
                   + (", 인증완료)" if campus_agent.status['token_exists'] else ", 토큰없음 → 'python3 campus_agent.py --auth' 필요)")
-                  if campus_agent.enabled else " — CAMPUS_AGENT_ENABLED 설정 필요"))
+                  if _campus_on else " — 로그인에서 학교 메일을 등록하면 시작합니다"))
     log("INFO", f"Supply Chain Agent: {os.getenv('SUPPLY_CHAIN_URL','http://localhost:8080')} "
                f"({'ON' if _sc_ok else 'OFF'})")
     _ollama_ok = _check_ollama()
@@ -2006,7 +2007,10 @@ def main():
 
     # ── JARVIS Link: 모바일 미러링 게이트웨이(웹소켓 Pub/Sub + 원격 승인 + 위험 푸시) ──
     link = init_link(logger=lambda lvl, msg: log(lvl, msg))
-    link.start()
+    try:
+        link.start()
+    except Exception as e:
+        log("WARN", f"JARVIS Link 기동 실패 — 화면·음성은 계속합니다: {e}")
     # 외출(자리비움) 상태 머신: 일정 시간 얼굴 미검출 시 자동 AWAY → 위험 시 모바일 푸시
     AWAY_TIMEOUT_SEC = float(os.getenv("JARVIS_AWAY_TIMEOUT_SEC", "120"))
     away_state = {"away": False, "last_seen": time.time(), "manual": False}

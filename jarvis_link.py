@@ -38,6 +38,7 @@ from __future__ import annotations
 import os
 import re
 import hmac
+import socket
 import time
 import json
 import queue
@@ -160,6 +161,28 @@ def _tg_creds() -> tuple:
 def _log_default(level: str, msg: str) -> None:
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] 📱 [JARVIS Link] {msg}")
+
+
+def _probe_host(host: str) -> str:
+    return "127.0.0.1" if host in ("0.0.0.0", "") else host
+
+
+def _port_busy(host: str, port: int) -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(0.3)
+        return sock.connect_ex((_probe_host(host), int(port))) == 0
+    except OSError:
+        return True
+    finally:
+        sock.close()
+
+
+def _free_port(host: str, preferred: int, span: int = 10) -> int | None:
+    for port in range(int(preferred), int(preferred) + span):
+        if not _port_busy(host, port):
+            return port
+    return None
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -731,8 +754,14 @@ class JarvisLink:
             return False
         if self._thread and self._thread.is_alive():
             return True
-        # Round 13: 공개 바인딩 안전 가드 — 명시 허용 없이 0.0.0.0/외부 IP 노출 금지(실수 방지)
         self.host = self._resolve_bind_host(self.host)
+        chosen = _free_port(self.host, self.port)
+        if chosen is None:
+            self._log("WARN", f"JARVIS Link 포트 {self.port}~{self.port + 9}가 사용 중이라 링크를 열지 못했습니다.")
+            return False
+        if chosen != self.port:
+            self._log("INFO", f"포트 {self.port}이 사용 중이라 {chosen}으로 엽니다.")
+            self.port = chosen
         # Round 16: 실제 TLS 적용 — 평문 전송 구간 암호화(토큰/데이터 스니핑 차단)
         certfile, keyfile = self._resolve_tls()
         self._tls = bool(certfile and keyfile)
