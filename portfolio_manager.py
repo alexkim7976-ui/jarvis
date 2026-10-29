@@ -26,10 +26,14 @@ from pathlib import Path
 from datetime import datetime
 
 try:
-    import yfinance as yf
-    YF_AVAILABLE = True
+    from stock_quant import YF_AVAILABLE, yf
 except ImportError:
-    YF_AVAILABLE = False
+    try:
+        import yfinance as yf
+        YF_AVAILABLE = True
+    except ImportError:
+        YF_AVAILABLE = False
+        yf = None
 
 # 한글 종목명 → 야후 티커 변환 재사용 (stock_quant 와 동일 컨벤션)
 try:

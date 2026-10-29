@@ -16,26 +16,26 @@ from interest_prefetch import (
 from korean_font import put_text
 
 TASKS = (
-    ("prefetch", "관심 미리받기"),
-    ("news", "뉴스"),
-    ("price", "지정가"),
-    ("whale", "고래"),
-    ("social", "소셜"),
-    ("stock", "주가"),
-    ("campus", "캠퍼스"),
-    ("github", "깃허브"),
+    ("prefetch", "Interest Prefetch"),
+    ("news", "News"),
+    ("price", "Price Alerts"),
+    ("whale", "Whale Tracker"),
+    ("social", "Social Spike"),
+    ("stock", "Stock Monitor"),
+    ("campus", "Campus Agent"),
+    ("github", "GitHub"),
 )
 
 _LABELS = dict(TASKS)
 _ALIASES = {
-    "prefetch": ("관심 미리받기", "관심 미리", "미리받기", "프리페치", "prefetch"),
-    "price": ("지정가", "가격 알림"),
-    "news": ("뉴스",),
-    "whale": ("고래",),
-    "social": ("소셜", "레딧"),
-    "stock": ("주가",),
-    "campus": ("캠퍼스", "학교 메일"),
-    "github": ("깃허브", "github", "플레이스토어"),
+    "prefetch": ("관심 미리받기", "관심 미리", "미리받기", "프리페치", "prefetch", "interest prefetch"),
+    "price": ("지정가", "가격 알림", "price alert", "price alerts", "price"),
+    "news": ("뉴스", "news"),
+    "whale": ("고래", "whale", "whale tracker"),
+    "social": ("소셜", "레딧", "social", "reddit"),
+    "stock": ("주가", "stock", "stock monitor"),
+    "campus": ("캠퍼스", "학교 메일", "campus", "campus agent"),
+    "github": ("깃허브", "github", "플레이스토어", "playstore"),
 }
 _runners: dict[str, dict] = {}
 
@@ -96,7 +96,7 @@ def is_running(key: str) -> bool:
 def set_enabled(key: str, on: bool) -> str:
     state = _load()
     if key not in state:
-        return "없는 백그라운드입니다."
+        return "Unknown background task."
     state[key] = bool(on)
     _save(state)
     label = _LABELS[key]
@@ -109,10 +109,10 @@ def set_enabled(key: str, on: bool) -> str:
             else:
                 runner["stop"]()
         except Exception as exc:
-            return f"{label} 설정은 저장했지만 적용에 실패했습니다. {exc}"
+            return f"Saved {label} setting, but failed to apply: {exc}"
     if on and runner and not runner["running"]():
-        return f"{label} 백그라운드를 켰습니다. 지금은 감시 대상이 없어 대기합니다."
-    return f"{label} 백그라운드를 {'켰습니다' if on else '껐습니다'}."
+        return f"Enabled {label} background task. Standing by until targets are configured."
+    return f"{label} background task {'enabled' if on else 'disabled'}."
 
 
 def set_all(on: bool) -> str:
@@ -123,26 +123,26 @@ def summary() -> str:
     parts = []
     for key, label in TASKS:
         if not is_enabled(key):
-            state = "꺼짐"
+            state = "OFF"
         elif is_running(key):
-            state = "실행 중"
+            state = "RUNNING"
         else:
-            state = "켜짐"
-        parts.append(f"{label} {state}")
-    topics = ", ".join(list_interests()) or "없음"
-    return "백그라운드. " + ". ".join(parts) + f". 관심: {topics}."
+            state = "ON"
+        parts.append(f"{label}: {state}")
+    topics = ", ".join(list_interests()) or "None"
+    return "Background tasks — " + ", ".join(parts) + f". Interests: {topics}."
 
 
 def status_rows() -> tuple[list[tuple[str, str]], str]:
     rows = []
     for key, label in TASKS:
         if not is_enabled(key):
-            rows.append((label, "꺼짐"))
+            rows.append((label, "OFF"))
         elif is_running(key):
-            rows.append((label, "실행 중"))
+            rows.append((label, "RUNNING"))
         else:
-            rows.append((label, "켜짐"))
-    return rows, ", ".join(list_interests()) or "없음"
+            rows.append((label, "ON"))
+    return rows, ", ".join(list_interests()) or "None"
 
 
 def _clean_topic(text: str) -> str:
@@ -203,7 +203,7 @@ def interpret_control_command(text: str) -> str | None:
 def draw_background_panel(frame, visible: bool):
     h, w = frame.shape[:2]
     if not visible:
-        put_text(frame, "B  백그라운드", (min(280, max(16, w - 220)), 36), size=14, color=_DIM)
+        put_text(frame, "B  Background", (min(280, max(16, w - 220)), 36), size=14, color=_DIM)
         return frame
 
     rows, topics = status_rows()
@@ -216,14 +216,14 @@ def draw_background_panel(frame, visible: bool):
     cv2.rectangle(ov, (x, y), (x + pw, y + ph), _PANEL, -1)
     cv2.addWeighted(ov, 0.86, frame, 0.14, 0, frame)
     cv2.rectangle(frame, (x, y), (x + pw, y + ph), _CYAN, 1, cv2.LINE_AA)
-    put_text(frame, "백그라운드", (x + 14, y + 26), size=17, color=_CYAN, bold=True)
+    put_text(frame, "Background Tasks", (x + 14, y + 26), size=17, color=_CYAN, bold=True)
     line_y = y + 50
     for label, state in rows:
-        color = _OFF if state == "꺼짐" else _ON
+        color = _OFF if state in ("OFF", "꺼짐") else _ON
         put_text(frame, f"{label}   {state}", (x + 14, line_y), size=14, color=color)
         line_y += 22
-    put_text(frame, f"관심  {topics}", (x + 14, line_y + 6), size=13, color=(230, 240, 245))
-    put_text(frame, "말로  관심 추가 · 뉴스 백그라운드 꺼", (x + 14, line_y + 26), size=12, color=_DIM)
+    put_text(frame, f"Interests: {topics}", (x + 14, line_y + 6), size=13, color=(230, 240, 245))
+    put_text(frame, "Voice: Add interest · Turn off news background", (x + 14, line_y + 26), size=12, color=_DIM)
     return frame
 
 

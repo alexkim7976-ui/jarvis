@@ -35,10 +35,14 @@ from pathlib import Path
 from typing import Optional
 
 try:
-    import yfinance as yf
-    YF_AVAILABLE = True
+    from stock_quant import YF_AVAILABLE, yf
 except ImportError:
-    YF_AVAILABLE = False
+    try:
+        import yfinance as yf
+        YF_AVAILABLE = True
+    except ImportError:
+        YF_AVAILABLE = False
+        yf = None
 
 from stock_quant import _resolve_ticker
 

@@ -321,6 +321,58 @@ class ScreenOverlay:
     def is_active(self):
         return self._data is not None and time.time()<self._show_until
 
+    def content_rect(self, w: int, h: int) -> tuple[int, int, int, int] | None:
+        """활성 분석/표/종목 패널의 화면 bbox (x1,y1,x2,y2). 레이아웃 회피용."""
+        with self._lock:
+            data = self._data
+            active = self._data is not None and time.time() < self._show_until
+            collapse = self._table_collapse
+        if not active or not isinstance(data, dict):
+            return None
+        dt = data.get("type", "table")
+        if dt == "table":
+            headers = data.get("headers") or []
+            rows = data.get("rows") or []
+            if not headers or not rows or collapse >= 0.985:
+                return None
+            fold = _smoothstep(collapse)
+            vis = 1.0 - fold
+            nr_full = min(len(rows), 10)
+            nr = max(0, int(round(nr_full * vis))) if fold > 0 else nr_full
+            nc = len(headers)
+            cw = 140
+            pw = min(cw * nc + 40, w - 60)
+            ph = (nr + 2) * 30 + 50
+            scen_rows = data.get("scenario_rows") or []
+            if fold < 0.25:
+                if scen_rows:
+                    ph += 26 + len(scen_rows) * 22
+                if data.get("scenario_alert"):
+                    ph += 28
+            px, py = w - pw - 20, 60
+            return (px, py, px + pw, py + ph)
+        if dt == "stock":
+            details = data.get("details") or {}
+            pw, ph = 320, 180 + len(details) * 26
+            px, py = w - pw - 20, 60
+            return (px, py, px + pw, py + ph)
+        if dt == "info":
+            items = data.get("items") or {}
+            pw, ph = 300, 55 + len(items) * 26
+            px, py = w - pw - 20, 60
+            return (px, py, px + pw, py + ph)
+        if dt == "chart":
+            pw = min(520, w - 60)
+            ph = min(380, h - 120)
+            px, py = w - pw - 20, 62
+            return (px, py, px + pw, py + ph)
+        if dt == "image":
+            pw = min(int(data.get("width", 420)), w - 40)
+            ph = min(int(data.get("height", 320)), h - 80)
+            px, py = w - pw - 20, 64
+            return (px, py, px + pw, py + ph)
+        return None
+
     def _advance_animations(self):
         """프레임 dt 기반으로 레이더 팝업/테이블 접힘 보간값을 갱신(부드러운 30~60FPS)."""
         now=time.time()
@@ -538,7 +590,7 @@ class ScreenOverlay:
         ov=frame.copy()
         cv2.rectangle(ov,(px,py),(px+pw,py+ph),(15,15,15),-1)
         cv2.addWeighted(ov,panel_a,frame,1-panel_a,0,frame)
-        cv2.rectangle(frame,(px,py),(px+pw,py+ph),tcol,1)
+        cv2.rectangle(frame,(px,py),(px+pw,py+ph),tcol,1,cv2.LINE_AA)
         y=py+28
         if title: put_text(frame,title,(px+15,y),size=14,color=tcol,bold=True); y+=32
         cv2.rectangle(frame,(px+5,y-16),(px+pw-5,y+6),(40,40,40),-1)
@@ -590,10 +642,10 @@ class ScreenOverlay:
                 pass
         ov=frame.copy()
         cv2.rectangle(ov,(px,py),(px+pw,py+ph),(10,10,10),-1)
-        cv2.addWeighted(ov,0.88,frame,0.12,0,frame)
+        cv2.addWeighted(ov,0.82,frame,0.18,0,frame)
         is_up=str(change).startswith("+") or "▲" in str(change)
         bc=(60,220,60) if is_up else (60,60,255)
-        cv2.rectangle(frame,(px,py),(px+pw,py+ph),bc,2)
+        cv2.rectangle(frame,(px,py),(px+pw,py+ph),bc,2,cv2.LINE_AA)
         cv2.rectangle(frame,(px,py),(px+pw,py+42),bc,-1)
         put_text(frame,f"{sym}  {name}",(px+12,py+28),size=14,color=(0,0,0),bold=True)
         y=py+70

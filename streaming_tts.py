@@ -189,7 +189,7 @@ def _extract_flush_chunk(buffer: str, *, force: bool = False) -> tuple[str, str]
 
 def _log(msg):
     ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] 🔊 [스트리밍] {msg}")
+    print(f"[{ts}] 🔊 [StreamingTTS] {msg}")
 
 
 class StreamingTTSPipeline:
@@ -246,11 +246,11 @@ class StreamingTTSPipeline:
 
         player = player if player is not None else self._player_ref
         if not wait_audio_idle(tts_pipeline=self, player=player, timeout=180.0):
-            _log("⚠ 다른 음성 재생 대기 초과 — 스트리밍 TTS 스킵")
+            _log("⚠ Timed out waiting for other audio playback — skipping streaming TTS")
             self._interrupted = True
             return False
         if not begin_speech(timeout=180.0):
-            _log("⚠ 음성 게이트 확보 실패 — 스트리밍 TTS 스킵")
+            _log("⚠ Failed to acquire speech gate — skipping streaming TTS")
             self._interrupted = True
             return False
         self._speech_held = True
@@ -377,7 +377,7 @@ class StreamingTTSPipeline:
         if self._first_sentence_time == 0:
             self._first_sentence_time = time.time()
             latency = self._first_sentence_time - self._start_time
-            _log(f"발화 ({latency:.1f}초, {len(chunk)}자): {chunk[:40]}...")
+            _log(f"Speaking ({latency:.1f}s, {len(chunk)} chars): {chunk[:40]}...")
         self._sentence_q.put(chunk)
         self._sentences_sent += 1
 
@@ -506,17 +506,17 @@ class StreamingTTSPipeline:
 
         self._play_done.set()
         total = time.time() - self._start_time
-        _log(f"재생 완료 (문장={self._sentences_sent}, 총={total:.1f}초)")
+        _log(f"Playback complete (sentences={self._sentences_sent}, total={total:.1f}s)")
         self._release_speech_gate()
 
     def _synthesize(self, text, seq):
-        """단일 문장 합성 — 무료 모드: macOS say / 유료: Fish Audio"""
+        """Synthesize a single sentence — Free mode: macOS say / Paid: Fish Audio"""
         if free_only_enabled() or not use_paid_tts():
             if synthesize_macos:
                 path = synthesize_macos(text, seq=seq, audio_dir=AUDIO_DIR)
                 if path:
                     return path
-            _log("로컬 TTS(say) 실패 — 음성 합성 건너뜀")
+            _log("Local TTS (say) failed — skipping speech synthesis")
             return None
 
         # 키는 호출 시점에 읽는다 — jarvis_v2가 이 모듈을 import한 뒤 load_dotenv()를 부르므로,
@@ -528,7 +528,7 @@ class StreamingTTSPipeline:
                 path = synthesize_macos(text, seq=seq, audio_dir=AUDIO_DIR)
                 if path:
                     return path
-            _log("Fish Audio 키 없음 — 음성 합성 건너뜀 (.env FISH_AUDIO_API_KEY/FISH_VOICE_ID 확인)")
+            _log("No Fish Audio key — skipping synthesis (check .env FISH_AUDIO_API_KEY/FISH_VOICE_ID)")
             return None
 
         try:

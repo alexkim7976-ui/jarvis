@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # JARVIS.app — macOS 더블클릭 → jarvis_v2.py
 # 사용:
-#   ./scripts/build_jarvis_app.sh              # 프로젝트 내 JARVIS.app 빌드
-#   ./scripts/build_jarvis_app.sh --all        # 바탕화면 + ~/Applications 설치
+#   ./scripts/build_jarvis_app.sh --project-only     # 개발: project_root → 소스 트리
+#   ./scripts/build_jarvis_app.sh --release --all    # 출시: Resources/app 번들 + 설치
+#   ./scripts/build_jarvis_app.sh --all              # 개발 빌드 + 바탕화면/Applications
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -14,7 +15,19 @@ RESOURCES="$CONTENTS/Resources"
 VERSION="3.2.0"
 BUNDLE_ID="com.jarvis.assistant"
 
-echo "▶ JARVIS Mac 앱 빌드"
+RELEASE=0
+INSTALL_MODE="--project-only"
+for arg in "$@"; do
+  case "$arg" in
+    --release) RELEASE=1 ;;
+    --all) INSTALL_MODE="--all" ;;
+    --desktop) INSTALL_MODE="--desktop" ;;
+    --applications) INSTALL_MODE="--applications" ;;
+    --project-only) INSTALL_MODE="--project-only" ;;
+  esac
+done
+
+echo "▶ JARVIS Mac 앱 빌드 (release=$RELEASE)"
 echo "   프로젝트: $ROOT"
 
 if [[ -f "$ROOT/scripts/generate_jarvis_icon.py" ]]; then
@@ -24,9 +37,51 @@ fi
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS" "$RESOURCES"
 
-# 앱이 어디에 복사돼도 jarvis_v2.py 경로 유지
-printf '%s' "$ROOT" > "$RESOURCES/project_root"
-chmod 644 "$RESOURCES/project_root"
+bundle_release_app() {
+  local dest="$RESOURCES/app"
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  echo "▶ Resources/app 에 출시 코드 복사…"
+  rsync -a --delete \
+    --exclude '.git/' \
+    --exclude '.venv/' \
+    --exclude 'venv/' \
+    --exclude '__pycache__/' \
+    --exclude '*.pyc' \
+    --exclude '.env' \
+    --exclude '.env.*' \
+    --exclude 'scripts/release.env.example' \
+    --exclude 'audio_cache/' \
+    --exclude '.logs/' \
+    --exclude '.cache/' \
+    --exclude 'JARVIS.app/' \
+    --exclude 'target/' \
+    --exclude '.idea/' \
+    --exclude '.DS_Store' \
+    --exclude 'faces/' \
+    --exclude 'voice_profile/' \
+    --exclude 'portfolio.json' \
+    --exclude 'data/jarvis_memory.db' \
+    "$ROOT/" "$dest/"
+  # release template 은 반드시 포함
+  mkdir -p "$dest/scripts"
+  cp "$ROOT/scripts/release.env.example" "$dest/scripts/release.env.example"
+  cp "$ROOT/scripts/ollama_setup.py" "$dest/scripts/ollama_setup.py"
+  cp "$ROOT/scripts/app_setup_wizard.py" "$RESOURCES/app_setup_wizard.py"
+  cp "$ROOT/scripts/release.env.example" "$RESOURCES/release.env.example"
+  touch "$RESOURCES/release_mode"
+  rm -f "$RESOURCES/project_root"
+  echo "✓ release_mode + Resources/app ($(du -sh "$dest" | awk '{print $1}'))"
+}
+
+if [[ "$RELEASE" == "1" ]]; then
+  bundle_release_app
+else
+  # 개발: 앱이 어디에 복사돼도 jarvis_v2.py 경로 유지
+  printf '%s' "$ROOT" > "$RESOURCES/project_root"
+  chmod 644 "$RESOURCES/project_root"
+  rm -f "$RESOURCES/release_mode"
+fi
 
 # 런처 스크립트를 앱 번들에 내장 (프로젝트 scripts 경로에 의존하지 않음)
 cp "$ROOT/scripts/jarvis_launcher.sh" "$RESOURCES/jarvis_launcher.sh"
@@ -92,7 +147,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <key>NSCameraUsageDescription</key>
   <string>JARVIS HUD와 차트 분석을 위해 웹캠이 필요합니다.</string>
   <key>NSLocationUsageDescription</key>
-  <string>JARVIS가 현재 위치(도시·지역)와 현지 시각·날씨를 안내하려면 위치 접근이 필요합니다.</string>
+  <string>JARVIS가 현재 위치(도시·지역)와 현지 시각을 안내하려면 위치 접근이 필요합니다.</string>
   <key>NSLocationWhenInUseUsageDescription</key>
   <string>JARVIS가 "내 위치 어디야" 등 위치 기반 안내를 하려면 사용 중 위치 접근이 필요합니다.</string>
   <key>NSAppleEventsUsageDescription</key>
@@ -160,7 +215,7 @@ install_copy() {
   echo "✓ ${label}: ${dest}"
 }
 
-case "${1:---all}" in
+case "$INSTALL_MODE" in
   --desktop)   install_copy "$HOME/Desktop/${APP_NAME}.app" "바탕화면" ;;
   --applications) install_copy "$HOME/Applications/${APP_NAME}.app" "응용 프로그램" ;;
   --all)
@@ -169,6 +224,9 @@ case "${1:---all}" in
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  JARVIS.app 설치 완료"
+    if [[ "$RELEASE" == "1" ]]; then
+      echo "  출시 번들 — 데이터: ~/Library/Application Support/JARVIS"
+    fi
     echo "  바탕화면 또는 Launchpad에서 더블클릭"
     echo "  → jarvis_v2.py (IRON MAN HUD) 실행"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -177,7 +235,7 @@ case "${1:---all}" in
     echo "  (프로젝트 폴더에만 생성 — --all 로 바탕화면 설치)"
     ;;
   *)
-    echo "옵션: --all | --desktop | --applications | --project-only"
+    echo "옵션: [--release] --all | --desktop | --applications | --project-only"
     exit 1
     ;;
 esac

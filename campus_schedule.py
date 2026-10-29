@@ -96,17 +96,17 @@ def next_class_from_schedule(now: datetime | None = None) -> dict | None:
 
 
 def format_next_class_briefing(info: dict) -> str:
-    course = info.get("course", "수업")
-    loc = info.get("location") or info.get("building") or "장소 미등록"
+    course = info.get("course", "class")
+    loc = info.get("location") or info.get("building") or "an unlisted location"
     mins = info.get("starts_in_min", 0)
     when = info.get("start_time", "")
     if mins <= 0:
-        time_phrase = "곧 시작합니다"
+        time_phrase = "is starting shortly"
     elif mins < 60:
-        time_phrase = f"{mins}분 후({when})"
+        time_phrase = f"starts in {mins} minutes ({when})"
     else:
-        time_phrase = f"{mins // 60}시간 {mins % 60}분 후({when})"
-    return f"다음 수업은 {course}이고, {loc}에서 {time_phrase} 시작합니다."
+        time_phrase = f"starts in {mins // 60} hours {mins % 60} minutes ({when})"
+    return f"Your next class is {course} at {loc}, which {time_phrase}."
 
 
 def is_class_like_event(title: str, location: str = "") -> bool:

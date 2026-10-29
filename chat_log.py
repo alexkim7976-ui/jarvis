@@ -66,14 +66,14 @@ class ChatLog:
         with self._lock: msgs=list(self._messages)
         if not msgs: return frame
 
-        self._scroll+=(self._target_scroll-self._scroll)*0.15
+        self._scroll+=(self._target_scroll-self._scroll)*0.22
         px=self.panel_x; py=self.panel_y; pw=self.panel_w
         panel_h=self._visible*self.line_h+40
 
         # 배경
         ov=frame.copy()
         cv2.rectangle(ov,(px,py),(px+pw,py+panel_h),PANEL_BG,-1)
-        cv2.addWeighted(ov,0.65,frame,0.35,0,frame)
+        cv2.addWeighted(ov,0.58,frame,0.42,0,frame)
         cv2.rectangle(frame,(px,py),(px+pw,py+panel_h),CYAN_DARK,1,cv2.LINE_AA)
 
         # 헤더

@@ -201,8 +201,13 @@ class GestureController:
         self.current_gesture = "NONE"
         self.current_action = ""
 
-        if not PYAUTOGUI_AVAILABLE:
-            _log("pyautogui 미설치 — pip install pyautogui")
+    def set_enabled(self, on: bool) -> str:
+        """마우스 제어를 켠다. pyautogui가 없으면 켜지 않고 이유를 돌려준다."""
+        if on and not PYAUTOGUI_AVAILABLE:
+            self.enabled = False
+            return "제스처 마우스는 pyautogui가 있어야 켤 수 있습니다."
+        self.enabled = bool(on)
+        return "ON" if self.enabled else "OFF"
 
     def _get_screen_size(self):
         try:

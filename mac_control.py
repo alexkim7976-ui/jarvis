@@ -104,20 +104,20 @@ def _run_osascript(script: str) -> tuple[bool, str]:
 
 def get_volume() -> dict[str, Any]:
     if sys.platform != "darwin":
-        return {"success": False, "message": "macOS 전용 기능입니다."}
+        return {"success": False, "message": "This feature is only supported on macOS."}
     ok, out = _run_osascript("output volume of (get volume settings)")
     if not ok:
-        return {"success": False, "message": f"볼륨 조회 실패: {out}"}
+        return {"success": False, "message": f"Failed to get volume: {out}"}
     try:
         level = int(out.split(",")[0].strip())
     except ValueError:
-        return {"success": False, "message": f"볼륨 파싱 실패: {out}"}
-    return {"success": True, "level": max(0, min(100, level)), "message": f"현재 볼륨 {level}%입니다."}
+        return {"success": False, "message": f"Failed to parse volume: {out}"}
+    return {"success": True, "level": max(0, min(100, level)), "message": f"Current volume is {level}%."}
 
 
 def set_volume(level: int | None = None, direction: str | None = None, delta: int = 10) -> dict[str, Any]:
     if sys.platform != "darwin":
-        return {"success": False, "message": "macOS 전용 기능입니다."}
+        return {"success": False, "message": "This feature is only supported on macOS."}
 
     delta = max(1, min(50, int(delta or 10)))
 
@@ -125,15 +125,15 @@ def set_volume(level: int | None = None, direction: str | None = None, delta: in
         lv = max(0, min(100, int(level)))
         ok, err = _run_osascript(f"set volume output volume {lv}")
         if not ok:
-            return {"success": False, "message": f"볼륨 설정 실패: {err}"}
-        return {"success": True, "level": lv, "message": f"볼륨을 {lv}%로 설정했습니다."}
+            return {"success": False, "message": f"Failed to set volume: {err}"}
+        return {"success": True, "level": lv, "message": f"Volume set to {lv}%."}
 
     d = (direction or "").lower().strip()
     if d == "mute":
         ok, err = _run_osascript("set volume output volume 0")
         if not ok:
-            return {"success": False, "message": f"음소거 실패: {err}"}
-        return {"success": True, "level": 0, "message": "볼륨을 음소거했습니다."}
+            return {"success": False, "message": f"Failed to mute: {err}"}
+        return {"success": True, "level": 0, "message": "Volume muted."}
 
     cur = get_volume()
     if not cur.get("success"):
@@ -145,32 +145,32 @@ def set_volume(level: int | None = None, direction: str | None = None, delta: in
     elif d == "down":
         nv = max(0, now - delta)
     else:
-        return {"success": False, "message": "level 또는 direction(up/down/mute)을 지정해 주세요."}
+        return {"success": False, "message": "Please specify level or direction (up/down/mute)."}
 
     ok, err = _run_osascript(f"set volume output volume {nv}")
     if not ok:
-        return {"success": False, "message": f"볼륨 조절 실패: {err}"}
-    verb = "올렸" if d == "up" else "내렸"
-    return {"success": True, "level": nv, "message": f"볼륨을 {verb}습니다. 현재 {nv}%입니다."}
+        return {"success": False, "message": f"Failed to adjust volume: {err}"}
+    verb = "increased" if d == "up" else "decreased"
+    return {"success": True, "level": nv, "message": f"Volume {verb} to {nv}%."}
 
 
-def set_timer(minutes: float, label: str = "타이머") -> dict[str, Any]:
+def set_timer(minutes: float, label: str = "Timer") -> dict[str, Any]:
     try:
         mins = float(minutes)
     except (TypeError, ValueError):
-        return {"success": False, "message": "minutes는 숫자여야 합니다."}
+        return {"success": False, "message": "minutes must be a number."}
     if mins <= 0 or mins > 24 * 60:
-        return {"success": False, "message": "타이머는 0분 초과 24시간 이하여야 합니다."}
+        return {"success": False, "message": "Timer must be between 0 minutes and 24 hours."}
 
     seconds = max(1, int(mins * 60))
-    safe_label = (label or "타이머").replace('"', "'")[:120]
+    safe_label = (label or "Timer").replace('"', "'")[:120]
     timer_id = f"timer_{int(time.time())}_{len(_active_timers)}"
     fire_at = datetime.now().strftime("%H:%M")
 
     def _fire():
         if sys.platform == "darwin":
             _run_osascript(
-                f'display notification "{safe_label}" with title "JARVIS 타이머" sound name "Glass"'
+                f'display notification "{safe_label}" with title "JARVIS Timer" sound name "Glass"'
             )
         for t in _active_timers:
             if t.get("id") == timer_id:
@@ -192,14 +192,13 @@ def set_timer(minutes: float, label: str = "타이머") -> dict[str, Any]:
         "success": True,
         "timer_id": timer_id,
         "minutes": mins,
-        "message": f"{mins:g}분 타이머를 설정했습니다. ({safe_label})",
+        "message": f"Set a timer for {mins:g} minutes ({safe_label}).",
     }
 
 
 def media_play_pause() -> dict[str, Any]:
     if sys.platform != "darwin":
-        return {"success": False, "message": "macOS 전용 기능입니다."}
-    # Spotify 우선, 없으면 시스템 미디어 키
+        return {"success": False, "message": "This feature is only supported on macOS."}
     ok, err = _run_osascript(
         'try\n'
         '  tell application "Spotify" to playpause\n'
@@ -210,8 +209,8 @@ def media_play_pause() -> dict[str, Any]:
         'end try'
     )
     if not ok:
-        return {"success": False, "message": f"재생 제어 실패: {err}"}
-    return {"success": True, "message": "미디어 재생을 전환했습니다."}
+        return {"success": False, "message": f"Playback control failed: {err}"}
+    return {"success": True, "message": "Toggled media playback."}
 
 
 def execute_mac_control_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:

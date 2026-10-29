@@ -130,7 +130,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <key>NSCameraUsageDescription</key>
   <string>JARVIS HUD와 차트 분석을 위해 웹캠이 필요합니다.</string>
   <key>NSLocationUsageDescription</key>
-  <string>JARVIS가 현재 위치와 현지 시각·날씨를 안내하려면 위치 접근이 필요합니다.</string>
+  <string>JARVIS가 현재 위치와 현지 시각을 안내하려면 위치 접근이 필요합니다.</string>
   <key>NSLocationWhenInUseUsageDescription</key>
   <string>JARVIS가 위치 기반 안내를 하려면 사용 중 위치 접근이 필요합니다.</string>
   <key>NSAppleEventsUsageDescription</key>

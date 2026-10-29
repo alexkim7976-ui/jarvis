@@ -39,7 +39,7 @@ def try_ecosystem_response(text: str) -> dict[str, Any] | None:
     if not t:
         return None
 
-    # 1) 다음 수업 (SBU / Campus Quest)
+    # 1) Next class (SBU / Campus Quest)
     if _NEXT_CLASS.search(t):
         try:
             from campus_schedule import next_class_from_schedule, format_next_class_briefing
@@ -51,10 +51,10 @@ def try_ecosystem_response(text: str) -> dict[str, Any] | None:
                     "success": True, "domain": "campus", "briefing": msg,
                     "overlay_table": {
                         "type": "table",
-                        "title": "🎓 다음 수업 (Campus Quest)",
-                        "headers": ["과목", "장소", "시작", "남은 시간"],
+                        "title": "🎓 Next Class (Campus Quest)",
+                        "headers": ["Course", "Location", "Start", "Starts In"],
                         "rows": [[local.get("course", "-"), loc, local.get("start_time", "-"),
-                                  f"{local.get('starts_in_min', 0)}분"]],
+                                  f"{local.get('starts_in_min', 0)} min"]],
                     },
                 }
         except Exception:
@@ -68,7 +68,7 @@ def try_ecosystem_response(text: str) -> dict[str, Any] | None:
         except Exception:
             pass
 
-    # 2) 주식 의견 — 로컬 분석 파이프라인 (네이버 어때? 등)
+    # 2) Stock opinion — local analysis pipeline
     try:
         from local_stock_router import detect_stock_query, run_local_stock_analysis
         target = detect_stock_query(t)
@@ -88,9 +88,9 @@ def try_ecosystem_response(text: str) -> dict[str, Any] | None:
     except Exception:
         pass
 
-    # 3) 캘린더 / 미리알림
+    # 3) Calendar / Reminders
     if _CALENDAR.search(t):
-        date = "내일" if _TOMORROW.search(t) else ("오늘" if _TODAY.search(t) else "오늘")
+        date = "tomorrow" if _TOMORROW.search(t) else ("today" if _TODAY.search(t) else "today")
         if re.search(r"미리\s*알림|reminder", t, re.I):
             try:
                 from mac_calendar import get_mac_reminders
@@ -110,10 +110,10 @@ def try_ecosystem_response(text: str) -> dict[str, Any] | None:
                 r = get_mac_upcoming(hours=48)
                 if r.get("success") and r.get("events"):
                     ev = r["events"][0]
-                    briefing = f"다음 일정은 {ev.get('title')} ({ev.get('time')})"
+                    briefing = f"Your next event is {ev.get('title')} at {ev.get('time')}"
                     if ev.get("location"):
-                        briefing += f", 장소 {ev['location']}"
-                    briefing += "입니다."
+                        briefing += f", located at {ev['location']}"
+                    briefing += "."
                     return {"success": True, "domain": "calendar", "briefing": briefing, "raw": r}
             except Exception:
                 pass
@@ -125,9 +125,9 @@ def try_ecosystem_response(text: str) -> dict[str, Any] | None:
                     evs = r.get("events") or []
                     if evs:
                         parts = [f"{e.get('start')} {e.get('title')}" for e in evs[:4]]
-                        briefing = f"{date} 일정 {len(evs)}개입니다. " + ", ".join(parts) + "."
+                        briefing = f"You have {len(evs)} events for {date}: " + ", ".join(parts) + "."
                     else:
-                        briefing = r.get("message", f"{date} 일정이 없습니다.")
+                        briefing = r.get("message", f"You have no scheduled events for {date}.")
                     return {"success": True, "domain": "calendar", "briefing": briefing,
                             "overlay_table": _events_table(date, evs), "raw": r}
         except Exception:
@@ -140,7 +140,7 @@ def try_ecosystem_response(text: str) -> dict[str, Any] | None:
                 briefing = r.get("message", "")
                 if evs:
                     parts = [f"{e.get('start')} {e.get('title')}" for e in evs[:4]]
-                    briefing = f"{date} 일정 {len(evs)}개. " + ", ".join(parts) + "."
+                    briefing = f"You have {len(evs)} events for {date}: " + ", ".join(parts) + "."
                 return {"success": True, "domain": "calendar", "briefing": briefing,
                         "overlay_table": _events_table(date, evs), "raw": r}
         except Exception:
@@ -152,10 +152,10 @@ def try_ecosystem_response(text: str) -> dict[str, Any] | None:
 def _events_table(date: str, events: list) -> dict:
     rows = [[e.get("start", ""), e.get("title", ""), e.get("location", "")] for e in events[:8]]
     if not rows:
-        rows = [["-", "일정 없음", ""]]
+        rows = [["-", "No events", ""]]
     return {
         "type": "table",
-        "title": f"📅 {date} 일정",
-        "headers": ["시간", "일정", "장소"],
+        "title": f"📅 Schedule ({date})",
+        "headers": ["Time", "Event", "Location"],
         "rows": rows,
     }

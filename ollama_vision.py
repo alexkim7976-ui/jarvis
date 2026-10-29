@@ -34,11 +34,11 @@ def _vision_options() -> dict:
         return opts
 
 
-CHART_ANALYSIS_USER_PROMPT = """이 차트를 옆에서 편하게 설명하듯 분석해 주세요.
+CHART_ANALYSIS_USER_PROMPT = """Analyze this chart in a calm, natural spoken English style.
 
-캔들·추세, 이평선, 지지·저항, 매수/관망/매도 중 하나.
-말투: 부드럽고 자연스러운 한국어 존댓말/해요체 3~5문장. 반말 금지, 딱딱한 ~습니다체·번역투·번호 목록도 금지.
-차트가 안 보이면 추측 말고 다시 보여달라고만 해 주세요."""
+Cover: candle/trend structure, moving averages, support/resistance, and whether it suggests Buy, Hold, or Sell.
+Style: 3 to 5 concise sentences in natural English suitable for JARVIS voice output. No bullet points or numbered lists.
+If no chart is visible, simply ask the user to show the chart more clearly."""
 
 
 def ollama_available() -> bool:
@@ -72,22 +72,20 @@ def _is_mllama_error(text: str) -> bool:
 
 
 def humanize_vision_error(raw: str, model: str = "") -> str:
-    """사용자에게 보여줄 한국어 안내 (JSON 원문 숨김)."""
+    """User-friendly English error message."""
     if _is_mllama_error(raw):
         return (
-            f"차트 비전 모델({model or 'llama3.2-vision'})이 현재 Ollama와 호환되지 않습니다. "
-            "Ollama 앱을 최신으로 업데이트하거나, 터미널에서 "
-            "ollama pull moondream 후 .env 의 OLLAMA_VISION_MODEL=moondream 으로 바꿔 주세요. "
-            "지금은 종목명(예: 키움증권)을 말씀해 주시면 RSI·MACD 등 지표를 텍스트로 분석해 드리겠습니다."
+            f"The chart vision model ({model or 'llama3.2-vision'}) is incompatible with your current Ollama version. "
+            "Please update Ollama or run 'ollama pull moondream' and set OLLAMA_VISION_MODEL=moondream in .env."
         )
     if "404" in raw or "not found" in raw.lower():
         return (
-            f"비전 모델 '{model}' 을 찾을 수 없습니다. "
-            f"터미널: ollama pull {model or 'moondream'}"
+            f"Vision model '{model}' was not found. "
+            f"Run in terminal: ollama pull {model or 'moondream'}"
         )
     if len(raw) > 160:
         return raw[:160] + "…"
-    return raw or "로컬 차트 분석에 실패했습니다."
+    return raw or "Local chart vision analysis failed."
 
 
 def _vision_candidates(preferred: str | None = None) -> list[str]:

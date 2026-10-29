@@ -40,10 +40,14 @@ except Exception:
     net = requests
 
 try:
-    import yfinance as yf
-    YF_AVAILABLE = True
+    from stock_quant import YF_AVAILABLE, yf
 except ImportError:
-    YF_AVAILABLE = False
+    try:
+        import yfinance as yf
+        YF_AVAILABLE = True
+    except ImportError:
+        YF_AVAILABLE = False
+        yf = None
 
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")

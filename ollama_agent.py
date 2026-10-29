@@ -72,30 +72,42 @@ def ollama_available() -> bool:
         return False
 
 
-def model_supports_tools(model: str | None = None) -> bool:
-    """Ollama 모델 tools 지원 여부 (gemma3 등 미지원 모델 방지)."""
-    m = (model or OLLAMA_MODEL).lower()
+def _tools_supported_heuristic(model: str) -> bool:
+    m = model.lower()
     if "gemma3" in m and "gemma4" not in m:
         return False
+    return any(k in m for k in ("gemma4", "gemma2", "qwen", "llama3", "llama3.1", "llama3.2", "nemotron", "mistral"))
+
+
+def model_supports_tools(model: str | None = None, *, probe: bool = True) -> bool:
+    """Ollama 모델 tools 지원 여부 (gemma3 등 미지원 모델 방지)."""
+    name = model or OLLAMA_MODEL
+    if not _tools_supported_heuristic(name):
+        return False
+    if not probe or os.getenv("JARVIS_SKIP_TOOL_PROBE", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    timeout = float(os.getenv("OLLAMA_TOOL_PROBE_TIMEOUT", "8"))
     try:
         r = requests.post(
             f"{OLLAMA_URL}/api/chat",
             json={
-                "model": model or OLLAMA_MODEL,
+                "model": name,
                 "messages": [{"role": "user", "content": "ping"}],
                 "tools": [{"type": "function", "function": {
                     "name": "ping", "description": "ping",
                     "parameters": {"type": "object", "properties": {}},
                 }}],
                 "stream": False,
+                "options": {"num_predict": 1},
             },
-            timeout=15,
+            timeout=timeout,
         )
         if r.status_code != 200:
             return False
         return "does not support tools" not in (r.text or "").lower()
     except Exception:
-        return False
+        # 첫 로드·GPU 대기 등으로 타임아웃 — 휴리스틱으로 진행 (시작 막지 않음)
+        return _tools_supported_heuristic(name)
 
 
 def _ollama_options() -> dict:
@@ -175,12 +187,12 @@ def chat_with_tools(
             if final_text:
                 return final_text
             if log_fn:
-                log_fn("WARN", f"Ollama 호출 실패 → 오프라인으로 되돌림: {e}")
+                log_fn("WARN", f"Ollama call failed -> falling back to offline: {e}")
             try:
                 from runtime_backtrack import ollama_failure_reply
                 return ollama_failure_reply(user_text, e)
             except Exception:
-                return f"죄송합니다, {USER_DISPLAY_NAME}. 로컬 AI 연결에 실패했습니다."
+                return f"I apologize, {USER_DISPLAY_NAME}. Failed to connect to the local AI engine."
 
         msg = data.get("message") or {}
         content = (msg.get("content") or "").strip()
@@ -206,14 +218,14 @@ def chat_with_tools(
             final_text = content
     else:
         if not final_text:
-            final_text = f"요청을 처리했지만 음성 답변을 생성하지 못했습니다, {USER_DISPLAY_NAME}."
+            final_text = f"I processed your request, {USER_DISPLAY_NAME}, but could not generate a spoken response."
 
     if not final_text and messages:
         # 도구 결과만 있고 모델 텍스트 없음 → 한 줄 요약 재요청
         try:
             messages.append({
                 "role": "user",
-                "content": "위 도구 결과 briefing을 2문장 한국어로 요약해 주세요.",
+                "content": "Summarize the tool result above in 2 concise English sentences suitable for voice playback.",
             })
             r = requests.post(
                 f"{OLLAMA_URL}/api/chat",

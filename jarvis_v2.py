@@ -28,12 +28,40 @@ if (
     and os.getenv("JARVIS_SKIP_LOGIN", "").strip().lower() not in ("1", "true", "yes", "on")
 ):
     from user_account import ensure_login
+    print("▶ Opening sign-in window… (press ⌘+Tab → Python if hidden)", flush=True)
     ensure_login()
+    print("▶ Sign-in complete — loading J.A.R.V.I.S…", flush=True)
 
 import cv2, numpy as np, pyaudio, requests
-import mediapipe as mp
-from openai import OpenAI
 from dotenv import load_dotenv
+
+
+class _LazyModuleAttr:
+    """Lazy module / attribute proxy to avoid blocking top-level imports (mediapipe, openai, etc.)."""
+    def __init__(self, mod_name: str, attr_path: str = ""):
+        self._mod_name = mod_name
+        self._attr_path = attr_path
+        self._target = None
+
+    def _resolve(self):
+        if self._target is None:
+            import importlib
+            obj = importlib.import_module(self._mod_name)
+            for part in (self._attr_path.split(".") if self._attr_path else ()):
+                if part:
+                    obj = getattr(obj, part)
+            self._target = obj
+        return self._target
+
+    def __getattr__(self, name: str):
+        return getattr(self._resolve(), name)
+
+    def __call__(self, *args, **kwargs):
+        return self._resolve()(*args, **kwargs)
+
+
+mp = _LazyModuleAttr("mediapipe")
+OpenAI = _LazyModuleAttr("openai", "OpenAI")
 
 import net  # 느린 WiFi 최적화: 연결 재사용·재시도·적응형 타임아웃 공용 세션
 
@@ -59,6 +87,18 @@ from gesture_control import GestureController
 from voice_gesture import VoiceGestureHandler, detect_from_landmarks, voice_gestures_enabled
 from screen_keyboard import ScreenKeyboard
 from screen_help import draw_help
+from screen_performance import draw_performance_panel, handle_performance_key
+from performance_presets import interpret_performance_command
+from power_save_mode import (
+    PowerSaveFrameReader,
+    draw_power_save_button,
+    interpret_power_save_command,
+    is_active as power_save_active,
+    set_power_save,
+    status_message as power_save_status,
+    wants_power_save_off,
+    wants_power_save_on,
+)
 from background_control import (
     BACKGROUND_TOOLS, BACKGROUND_TOOL_NAMES, bind_task, draw_background_panel,
     execute_background_tool, interpret_control_command, is_enabled,
@@ -111,8 +151,8 @@ from security_policy import (
 )
 from openclaw_guard import OPENCLAW_TOOLS, execute_openclaw_tool, boot_openclaw_guard
 from resource_profile import (
-    is_low_mem, vision_enabled, camera_resolution, main_loop_fps, hand_complexity,
-    face_worker_interval, stagger_workers_enabled,
+    is_low_mem, vision_enabled, hands_enabled, camera_resolution, main_loop_fps,
+    hand_complexity, face_worker_interval, stagger_workers_enabled,
     worker_stagger_seconds, performance_profile_summary,
 )
 from context_manager import get_context_window, append_exchange, context_turn_limit
@@ -474,7 +514,7 @@ TOOLS:
 3. MAC CONTROL: set_volume(level|direction), get_volume, set_timer(minutes, label), media_play_pause — 볼륨·타이머·미디어 (macOS, 인터넷 불필요)
 4. SCREEN: display_table, compare_stocks_trend — show tables/data/comparison charts on webcam screen
 4. FACE: register_face, remove_face, list_faces
-5. WEATHER/LOCATION: get_current_weather, get_weather_forecast, get_current_location — GPS/IP 자동 위치+현지시각. "내 위치 어디야" → get_current_location. 날씨는 자동 감지 도시 또는 get_current_location 후 조회.
+5. LOCATION: get_current_location — GPS/IP 자동 위치+현지 시각. "내 위치 어디야" → get_current_location. (날씨 조회 기능 없음 — 날씨 질문에는 웹 검색 또는 안내 거절)
 6. SYSTEM: get_system_status, get_cpu_usage, get_memory_usage
 7. CALENDAR: get_events, create_event, delete_event, get_upcoming
 8. MONITOR: get_monitor_status, check_github_now, check_playstore_now
@@ -575,7 +615,6 @@ TOOLS:
 ★ CALENDAR: "내일 일정", "수업 뭐 있어" → get_events. "3시에 미팅 잡아줘" → create_event. "다음 일정" → get_upcoming.
   After getting events, call display_table type="table" with headers=["시간","일정","장소"] and rows.
 ★ SYSTEM: get_system_status → display_table type="info".
-★ WEATHER: English city names. After data, display_table.
 ★ STOCKS: web_search → display_table → verbal summary.
 ★ ALWAYS display_table after getting data. Respond in natural spoken Korean."""
 
@@ -1411,8 +1450,9 @@ def analyze_chart_image(image_path):
     return (resp.text or "").strip()
 
 
-mp_hands=mp.solutions.hands; mp_draw=mp.solutions.drawing_utils
-mp_styles=mp.solutions.drawing_styles
+mp_hands = _LazyModuleAttr("mediapipe", "solutions.hands")
+mp_draw = _LazyModuleAttr("mediapipe", "solutions.drawing_utils")
+mp_styles = _LazyModuleAttr("mediapipe", "solutions.drawing_styles")
 
 def detect_gesture(hl, frame_w: int = 640, frame_h: int = 480):
     """음성 모드용 MediaPipe HandState 제스처 (OPEN/FIST/THUMB_UP)."""
@@ -1425,6 +1465,10 @@ def detect_gesture(hl, frame_w: int = 640, frame_h: int = 480):
 
 def _is_app_launch() -> bool:
     return os.getenv("JARVIS_APP_LAUNCH", "").strip().lower() in ("1", "true", "yes")
+
+
+def _fast_boot_enabled() -> bool:
+    return os.getenv("JARVIS_FAST_BOOT", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _open_camera_privacy_settings() -> None:
@@ -1458,6 +1502,9 @@ class _PlaceholderCapture:
 
 def _open_camera_with_retry(*, w: int, h: int, retries: int = 20, delay: float = 0.5):
     """카메라 열기 — 앱 실행 시 권한 대화상자·설정 안내 후 재시도."""
+    if _is_app_launch() or _fast_boot_enabled():
+        retries = min(retries, 4)
+        delay = min(delay, 0.25)
     opened_settings = False
     for attempt in range(max(1, retries)):
         cap = cv2.VideoCapture(0)
@@ -1629,14 +1676,28 @@ def main():
         log("ERR","OPENAI_API_KEY 필요 (STT=api)"); sys.exit(1)
     if LLM_PROVIDER == "ollama":
         if not _check_ollama():
-            log("ERR", "Ollama 미실행 — brew install ollama && ollama serve")
-            sys.exit(1)
-        log("OK", f"🍎 Mac 로컬 AI — 대화/도구={OLLAMA_MODEL} | "
-                  f"주식={OLLAMA_STOCK_MODEL} | 차트비전={OLLAMA_VISION_MODEL}")
-        if _llm_brain_enabled():
-            log("OK", f"🧠 로컬 LLM 두뇌 ON — function calling ({len(ALL_TOOLS)} tools, 키워드 우회 OFF)")
+            if _is_app_launch() or _fast_boot_enabled():
+                log("WARN", "Ollama 준비 중 — HUD 먼저 시작 (백그라운드 대기)")
+                def _wait_for_ollama():
+                    for _ in range(45):
+                        if _check_ollama():
+                            log("OK", "🍎 Ollama 준비 완료")
+                            return
+                        time.sleep(1)
+                    log("WARN", "Ollama 대기 시간 초과 — brew install ollama && ollama serve")
+                threading.Thread(target=_wait_for_ollama, daemon=True, name="ollama-wait").start()
+            else:
+                log("ERR", "Ollama 미실행 — brew install ollama && ollama serve")
+                sys.exit(1)
+        if _check_ollama():
+            log("OK", f"🍎 Mac 로컬 AI — 대화/도구={OLLAMA_MODEL} | "
+                      f"주식={OLLAMA_STOCK_MODEL} | 차트비전={OLLAMA_VISION_MODEL}")
+            if _llm_brain_enabled():
+                log("OK", f"🧠 로컬 LLM 두뇌 ON — function calling ({len(ALL_TOOLS)} tools, 키워드 우회 OFF)")
+            else:
+                log("OK", "⚡ 주식 키워드 fast-path ON (JARVIS_LLM_BRAIN=0)")
         else:
-            log("OK", "⚡ 주식 키워드 fast-path ON (JARVIS_LLM_BRAIN=0)")
+            log("INFO", f"🍎 Mac 로컬 AI — Ollama 준비 대기 (모델={OLLAMA_MODEL})")
         import os as _os
         if _os.getenv("JARVIS_ECOSYSTEM_ROUTER", "1").strip().lower() not in ("0", "false", "off"):
             log("OK", "🔗 생태계 라우터 ON — 주식·Calendar·SBU·ZFoldMacBridge")
@@ -1673,7 +1734,17 @@ def main():
         log("INFO", "Gemini Context Cache 비활성 (GEMINI_CACHE_ENABLED=0)")
 
     # Supply Chain Java 백엔드 자동 기동 (미실행 시)
-    _sc_ok = start_supply_chain_backend()
+    _sc_ok = False
+    if _fast_boot_enabled():
+        def _boot_supply_chain():
+            nonlocal _sc_ok
+            try:
+                _sc_ok = start_supply_chain_backend()
+            except Exception as e:
+                log("WARN", f"Supply Chain 백엔드 기동: {e}")
+        threading.Thread(target=_boot_supply_chain, daemon=True, name="supply-chain-boot").start()
+    else:
+        _sc_ok = start_supply_chain_backend()
 
     # 느린/불안정한 WiFi 대응: 자동 재시도 + 적응형 타임아웃 (connect 빠르게, read 인내)
     oc = openai_client_for_stt(OPENAI_API_KEY or "")
@@ -1682,11 +1753,17 @@ def main():
     player=InterruptiblePlayer(); vad=VoiceActivityDetector()
     overlay=ScreenOverlay(); set_overlay_instance(overlay); set_overlay_ref(overlay)
     _vision_on=vision_enabled()
+    _hands_on=_vision_on and hands_enabled()
     _low_mem=is_low_mem()
     face_rec=FaceRecognizer(enabled=_vision_on); set_face_instance(face_rec)
     hud=IronManHUD()
+    try:
+        from hud_resources import get_resource_sampler
+        _resource_sampler = get_resource_sampler()
+    except Exception:
+        _resource_sampler = None
     gesture_ctrl=GestureController()
-    if not _vision_on:
+    if not _hands_on:
         gesture_ctrl.enabled=False
     bg_monitor=BackgroundMonitor()
     set_monitor_instance(bg_monitor)
@@ -1718,7 +1795,7 @@ def main():
     except ImportError:
         pass
 
-    wk=os.getenv("OPENWEATHER_API_KEY",""); tk=os.getenv("TAVILY_API_KEY","")
+    tk=os.getenv("TAVILY_API_KEY","")
     _tts_ok = bool(FISH_API_KEY)
     if free_only_enabled():
         try:
@@ -1731,7 +1808,7 @@ def main():
              "LLM": True,
              "TTS": _tts_ok,
              "WEB": _web_ok,
-             "WEATHER":bool(wk),"FILES":True,"FACE":face_rec.enabled}
+             "WEATHER":False,"FILES":True,"FACE":face_rec.enabled}
     log("OK","━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     log("OK","  IRON MAN HUD v3.2")
     log("OK","━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -1779,23 +1856,26 @@ def main():
                   f"강제={_sbx['enforced']} 조치={','.join(_sbx['measures'])}")
     except Exception as _e:
         log("WARN", f"🔒 파일 샌드박스 초기화 실패: {_e}")
-    # 변조 방지 감사 로그 무결성 검증 (구동 시 처음부터 끝까지 사슬 검사)
-    _chain_ok, _chain_msg = verify_audit_chain()
-    if _chain_ok:
-        log("OK", f"🔒 감사 로그 무결성: {_chain_msg}")
-    else:
-        # 무결성 깨짐 → 안전 모드 정책 적용
+    def _run_audit_chain_check():
+        _chain_ok, _chain_msg = verify_audit_chain()
+        if _chain_ok:
+            log("OK", f"🔒 감사 로그 무결성: {_chain_msg}")
+            return
         _enforce = os.getenv("JARVIS_AUDIT_ENFORCE", "warn").strip().lower()
         log("ERR", f"🔒 감사 로그 변조/누락 감지: {_chain_msg}")
         if _enforce in ("strict", "halt", "exit"):
-            log("ERR", "🔒 안전 모드: 감사 로그 무결성 위반으로 시스템을 종료합니다 "
+            log("ERR", "🔒 안전 모드: 감사 로그 무결성 위반 — 종료 예정 "
                        "(JARVIS_AUDIT_ENFORCE=strict). 'python3 security.py --reinit' 후 재시작하세요.")
             chain_event("AUDIT_INTEGRITY_HALT", {"reason": _chain_msg})
-            sys.exit(2)
-        else:
-            # 기본(warn): 손상 로그를 포렌식 격리하고 새 체인으로 자가복구
-            _arch = reinitialize_audit_log(reason="boot_integrity_fail")
-            log("WARN", f"🔒 손상 감사 로그를 격리하고 체인을 재초기화했습니다 → {_arch}")
+            os._exit(2)
+        _arch = reinitialize_audit_log(reason="boot_integrity_fail")
+        log("WARN", f"🔒 손상 감사 로그를 격리하고 체인을 재초기화했습니다 → {_arch}")
+
+    if _fast_boot_enabled():
+        threading.Thread(target=_run_audit_chain_check, daemon=True, name="audit-chain").start()
+        log("INFO", "🔒 감사 로그 무결성 검사 — 백그라운드")
+    else:
+        _run_audit_chain_check()
     chain_event("BOOT", {"version": "v3.2", "keychain_keys": _kc_keys})
     # 100-pass 보안 감사 (앱 실행 시 스킵 — 기동 속도·GUI 권한 우선)
     if os.getenv("JARVIS_SKIP_BOOT_AUDIT", "").strip().lower() not in ("1", "true", "yes"):
@@ -1841,9 +1921,15 @@ def main():
         log("INFO","→ 5초 정적 시 자동 종료 | 소음 자동 필터링")
     else:
         log("INFO","음성 프로필: 미학습 → V키로 음성 5회 수집")
-        log("INFO","→ 학습 전: 주먹/스페이스/웨이크워드 모두 사용 가능")
-    log("INFO",f"제스처 마우스: G키로 ON/OFF (☝이동 🤏클릭 ✌스크롤 👍볼륨)")
-    log("INFO","손짓 명령: 검지 유지 → 녹음 시작 · 브이 유지 → 전송 (G키 마우스 OFF일 때)")
+        if _hands_on:
+            log("INFO","→ 학습 전: 주먹/스페이스/웨이크워드 모두 사용 가능")
+        else:
+            log("INFO","→ 학습 전: 스페이스/웨이크워드로 녹음 (손 인식 OFF)")
+    if _hands_on:
+        log("INFO",f"제스처 마우스: G키로 ON/OFF (☝이동 🤏클릭 ✌스크롤 👍볼륨)")
+        log("INFO","손짓 명령: 검지 유지 → 녹음 시작 · 브이 유지 → 전송 (G키 마우스 OFF일 때)")
+    else:
+        log("INFO", "MediaPipe 손 OFF — 웨이크워드·스페이스·화면 키보드 (JARVIS_HANDS_ENABLED=1 로 복구)")
     log("INFO","화면 키보드: Enter 또는 / · 맥 입력기는 영어, 글자는 한글 두벌식 · Tab 한/영")
     log("INFO",f"차트 비전 분석: S키 — 웹캠에 차트를 비추고 누르면 기술적 분석 브리핑")
     log("INFO",f"백그라운드: GitHub={'ON' if bg_monitor.github_enabled else 'OFF'} | "
@@ -1854,9 +1940,15 @@ def main():
                   else " — NEWS_WATCHLIST 설정 필요"))
     log("INFO",f"포트폴리오: 예수금 {portfolio.data.get('available_cash_krw',0):,}원, "
                f"보유 {len(portfolio.data.get('holdings',{}))}개 ({portfolio.path})")
+    try:
+        from price_alert import technical_signal_alerts_enabled as _tech_sig_on
+    except ImportError:
+        _tech_sig_on = lambda: False  # noqa: E731
     log("INFO",f"지정가 알림: {'ON' if price_alert.enabled else 'OFF'}"
                + (f" ({', '.join(WATCH_LIST)}) RSI<{price_alert.rsi_oversold:g}, {price_alert.interval}초 간격"
-                  if price_alert.enabled else " — WATCH_LIST 설정 필요"))
+                  if price_alert.enabled else " — WATCH_LIST 설정 필요")
+               + (f" | RSI·볼린저 자동알림={'ON' if _tech_sig_on() else 'OFF(환율·목표가만)'}"
+                  if price_alert.enabled else ""))
     log("INFO",f"고래 추적: {'ON' if whale_tracker.enabled else 'OFF'}"
                + (f" ({', '.join(WHALE_WATCHLIST)}) {whale_tracker.interval}초 간격"
                   if whale_tracker.enabled else " — WHALE_WATCHLIST 설정 필요"))
@@ -1911,8 +2003,9 @@ def main():
     if camera_pending:
         chat_log.add("system", "📷 카메라 권한 필요 — 시스템 설정에서 JARVIS 허용")
         _vision_on = False
+        _hands_on = False
         hands = _HandsStub()
-        log("INFO", "카메라 권한 대기 — 제스처/얼굴 비활성, 음성·타이핑 사용 가능")
+        log("INFO", "카메라 권한 대기 — 얼굴/손 비활성, 음성·타이핑 사용 가능")
     _fps_cap = main_loop_fps()
     _stt_mode = resolve_stt_mode(OPENAI_API_KEY or "")
     log("INFO", f"카메라 해상도 {_cam_w}x{_cam_h}"
@@ -1920,17 +2013,19 @@ def main():
                f"{' | 권한대기' if camera_pending else ''}")
     if _low_mem:
         log("INFO", f"저사양 프로파일: 비전={'ON' if _vision_on else 'OFF'} | STT={_stt_mode}"
-                   f" | 제스처/얼굴/MediaPipe={'활성' if _vision_on else '비활성'}")
+                   f" | 얼굴={'ON' if _vision_on else 'OFF'} | 손={'ON' if _hands_on else 'OFF'}")
     # 프레임 캡처를 전용 스레드로 분리 — 메인 루프는 즉시 최신 프레임 수신
     frame_reader=FrameReader(cap); frame_reader.start()
     _camera_retry_at = time.time() + 8.0
-    # 손 인식: 저사양 시 MediaPipe 모델 자체를 로드하지 않음
-    if _vision_on and not camera_pending:
+    if _hands_on and not camera_pending:
         hands=mp_hands.Hands(model_complexity=hand_complexity(), max_num_hands=1,
                              min_detection_confidence=0.7, min_tracking_confidence=0.6)
     elif not camera_pending:
         hands=_HandsStub()
-        log("INFO", "MediaPipe Hands 비활성 — 웨이크워드/타이핑/스페이스로 명령 입력")
+        if _vision_on and not _hands_on:
+            log("INFO", "MediaPipe Hands OFF — 얼굴·웨이크워드·타이핑·스페이스")
+        elif not _vision_on:
+            log("INFO", "비전 OFF — 웨이크워드/타이핑/스페이스로 명령 입력")
 
     result_q=queue.Queue(); interrupt_flag=threading.Event(); face_event_q=queue.Queue()
     _edit_q=queue.Queue()   # (ChatMessage객체, 새텍스트) 쌍 — 터미널 편집 결과 전달용
@@ -1940,6 +2035,7 @@ def main():
     screen_kb = ScreenKeyboard()
     show_help = {"on": True}
     show_bg = {"on": False}
+    show_perf = {"on": False}
     # 종목명 오인식 → 후보 선택 대기 상태 (음성 번호 1~5 / 6=직접 타이핑)
     pending_sel={"active":False, "ctx":None, "await_record":False, "rearm":False, "retries":0}
     # 얼굴 인식 워커 — 저사양 시 스레드 미생성
@@ -1988,9 +2084,27 @@ def main():
 
     if stagger_workers_enabled():
         threading.Thread(target=_start_background_workers, daemon=True, name="worker-stagger").start()
-        log("INFO", f"백그라운드 워커 순차 기동 예약 (간격 {worker_stagger_seconds():.0f}초)")
+        log("INFO", f"Background workers scheduled with stagger ({worker_stagger_seconds():.0f}s interval)")
     else:
         _start_background_workers(stagger=False)
+
+    def _warmup_lazy_modules():
+        """Preload deferred heavy modules (pandas/yfinance, face_recognition) in background after HUD init."""
+        try:
+            time.sleep(1.5)
+            from stock_quant import pd as _pd, yf as _yf
+            if hasattr(_pd, "_load"):
+                _pd._load()
+            if _yf is not None and hasattr(_yf, "_load"):
+                _yf._load()
+            if _vision_on and face_rec.enabled:
+                from face_module import face_recognition as _fr
+                if _fr is not None and hasattr(_fr, "_load"):
+                    _fr._load()
+        except Exception:
+            pass
+
+    threading.Thread(target=_warmup_lazy_modules, daemon=True, name="lazy-warmup").start()
 
     # 선제적 매크로 가드레일 감시 — IDLE 중 '위험' 격상 시 먼저 음성 브리핑
     macro_guard = MacroGuardWatcher(status_fn=get_macro_market_status,
@@ -2035,15 +2149,111 @@ def main():
         else:
             chat_log.add("system", "V키로 음성 5회 수집 → 주인 전용 모드 활성화")
     chat_log.add("system", "⌨ Enter 또는 / : 화면에 키보드 입력 (맥 입력기는 영어, 글자는 한글)")
-    chat_log.add("system", "B키  백그라운드 켜기/끄기  ·  관심 추가 주제  ·  뉴스 백그라운드 꺼")
+    chat_log.add("system", "B키  백그라운드 켜기/끄기  ·  Z키 절전(웹캠·Whisper OFF)")
     chat_log.add("system", "☝ 검지를 유지하면 손짓 명령 · ✌ 브이를 유지하면 전송")
 
     # 스트리밍 TTS 파이프라인
     tts_pipeline = StreamingTTSPipeline()
     tts_pipeline.set_player(player)
 
+    _wake_before_power_save = {"enabled": True}
+
+    def _power_save_camera_off():
+        nonlocal cap, frame_reader, _vision_on, _hands_on, camera_pending, face_worker, hands
+        try:
+            frame_reader.stop()
+        except Exception:
+            pass
+        try:
+            if cap is not None:
+                cap.release()
+        except Exception:
+            pass
+        cap = None
+        _vision_on = False
+        _hands_on = False
+        camera_pending = False
+        try:
+            face_worker.stop()
+        except Exception:
+            pass
+        frame_reader = PowerSaveFrameReader(_cam_w, _cam_h)
+
+    def _power_save_camera_on():
+        nonlocal cap, frame_reader, _vision_on, _hands_on, camera_pending, face_worker, hands
+        new_cap, still_pending = _open_camera_with_retry(w=_cam_w, h=_cam_h, retries=4, delay=0.35)
+        if new_cap is None:
+            frame_reader = PowerSaveFrameReader(_cam_w, _cam_h)
+            chat_log.add("system", "📷 웹캠 복구 실패 — 절전 화면 유지")
+            return
+        cap = new_cap
+        camera_pending = still_pending
+        _vision_on = vision_enabled() and not still_pending
+        _hands_on = _vision_on and hands_enabled()
+        frame_reader = FrameReader(cap)
+        frame_reader.start()
+        if _hands_on:
+            try:
+                hands.close()
+            except Exception:
+                pass
+            hands = mp_hands.Hands(
+                model_complexity=hand_complexity(), max_num_hands=1,
+                min_detection_confidence=0.7, min_tracking_confidence=0.6,
+            )
+        elif _vision_on:
+            hands = _HandsStub()
+        if _vision_on and face_rec.enabled:
+            face_worker = FaceWorker(
+                face_rec, face_event_q, interval=face_worker_interval(),
+                gate=lambda: state != "RECORDING",
+            )
+            face_worker.start()
+        else:
+            face_worker = _NoOpFaceWorker()
+        if still_pending:
+            chat_log.add("system", "📷 카메라 권한 필요 — 설정에서 허용")
+        else:
+            chat_log.add("system", "📷 웹캠 복구됨")
+
+    def _power_save_wake_off():
+        _wake_before_power_save["enabled"] = wake.enabled
+        wake.enabled = False
+        wake.pause()
+
+    def _power_save_wake_on():
+        wake.enabled = _wake_before_power_save.get("enabled", True)
+        if wake.enabled:
+            wake.resume()
+
+    def _apply_power_save(on: bool) -> str:
+        ps_kwargs = dict(
+            camera_off=_power_save_camera_off,
+            camera_on=_power_save_camera_on,
+            wake_off=_power_save_wake_off,
+            wake_on=_power_save_wake_on,
+            log_fn=log,
+        )
+        if on:
+            if state == "RECORDING":
+                recorder.stop()
+            return set_power_save(True, **ps_kwargs)
+        return set_power_save(False, **ps_kwargs)
+
     def _reply_control(clean):
-        reply = interpret_control_command(clean)
+        ps_hint = interpret_power_save_command(clean)
+        if ps_hint:
+            reply = ps_hint
+        elif wants_power_save_on(clean):
+            reply = _apply_power_save(True)
+        elif wants_power_save_off(clean):
+            reply = _apply_power_save(False)
+        else:
+            reply = None
+        if not reply:
+            reply = interpret_performance_command(clean)
+        if not reply:
+            reply = interpret_control_command(clean)
         if not reply:
             return False
         chat_log.add("user", clean)
@@ -2297,21 +2507,45 @@ def main():
             threading.Thread(target=process_async,args=(wav,),daemon=True).start()
 
     def startup_greeting():
-        """시작 인사 — GPS/IP 자동 위치 + 현지 시각 + 날씨."""
+        """시작 인사 — 시각·위치 후 환율(종목 제외) + CPU/RAM."""
         try:
             from weather_module import (
                 ask_location_on_boot, build_auto_startup_briefing,
-                load_user_city, startup_location_prompt,
+                build_fast_startup_greeting, build_location_weather_followup,
+                load_user_city, startup_location_prompt, _fast_boot_enabled as _wm_fast,
             )
+            from startup_briefing import (
+                build_startup_fx_briefing, build_startup_fx_overlay,
+                build_startup_resource_line,
+                startup_fx_enabled, startup_resource_voice_enabled,
+            )
+
+            def _speak_block(text: str, tag: str):
+                text = polish_for_voice(text or "")
+                if not text:
+                    return
+                chat_log.add("jarvis", text)
+                log("INFO", f"🌅 {tag}: {text[:80]}...")
+                speak_text(text)
+
             if ask_location_on_boot() and not load_user_city():
                 msg = startup_location_prompt()
                 chat_log.add("system", "📍 도시 음성 입력 모드")
+                _speak_block(msg, "도시 입력")
+                return
+            if _wm_fast() or _fast_boot_enabled():
+                _speak_block(build_fast_startup_greeting(), "시작 인사")
+                _speak_block(build_location_weather_followup(try_gps=True), "위치")
             else:
-                msg = build_auto_startup_briefing()
-            msg = polish_for_voice(msg)
-            chat_log.add("jarvis", msg)
-            log("INFO", f"🌅 시작 인사: {msg[:80]}...")
-            speak_text(msg)
+                _speak_block(build_auto_startup_briefing(), "시작 인사")
+            if startup_fx_enabled():
+                fx_msg = build_startup_fx_briefing()
+                fx_hud = build_startup_fx_overlay()
+                if fx_hud:
+                    overlay.set_data(fx_hud, duration=45, alert=False)
+                _speak_block(fx_msg, "환율")
+            if startup_resource_voice_enabled():
+                _speak_block(build_startup_resource_line(), "시스템")
         except Exception as e:
             log("WARN", f"시작 인사 실패: {e}")
 
@@ -2442,7 +2676,10 @@ def main():
 
     prev_state=state; state_since=time.time()
     STUCK_TIMEOUT=60.0  # PROCESSING/SPEAKING 비정상 고착 시 강제 IDLE 복구 (초)
-    boot_ts=time.time(); GREET_BOOT_SUPPRESS=25.0  # 부팅 직후 얼굴 인사 억제 — 시작 인사(시간/위치)만 남김
+    boot_ts=time.time(); GREET_BOOT_SUPPRESS=45.0  # 부팅 직후 종목·매크로 음성 억제 — 환율 시작 인사만
+
+    def _boot_voice_quiet() -> bool:
+        return time.time() - boot_ts < GREET_BOOT_SUPPRESS
     idle_tracker = IdleTracker()
     _loop_min_interval = 1.0 / _fps_cap
     _loop_next = time.monotonic()
@@ -2552,13 +2789,13 @@ def main():
             chat_log.add("system", "▶ JARVIS 앱으로 포커스")
 
         ret,frame=frame_reader.read()
-        if not ret and not camera_pending:
+        if not ret and not camera_pending and not power_save_active():
             break                    # 카메라 영구 종료
         if frame is None:
             time.sleep(0.01)                 # 프레임 타임아웃 시 busy-wait 방지
             continue
 
-        if camera_pending and time.time() >= _camera_retry_at:
+        if camera_pending and not power_save_active() and time.time() >= _camera_retry_at:
             _camera_retry_at = time.time() + 5.0
             new_cap, still_pending = _open_camera_with_retry(
                 w=_cam_w, h=_cam_h, retries=4, delay=0.35,
@@ -2572,9 +2809,10 @@ def main():
                 cap = new_cap
                 camera_pending = False
                 _vision_on = vision_enabled()
+                _hands_on = _vision_on and hands_enabled()
                 frame_reader = FrameReader(cap)
                 frame_reader.start()
-                if _vision_on:
+                if _hands_on:
                     try:
                         hands.close()
                     except Exception:
@@ -2583,12 +2821,18 @@ def main():
                         model_complexity=hand_complexity(), max_num_hands=1,
                         min_detection_confidence=0.7, min_tracking_confidence=0.6,
                     )
-                    if face_rec.enabled:
-                        face_worker = FaceWorker(
-                            face_rec, face_event_q, interval=face_worker_interval(),
-                            gate=lambda: state != "RECORDING",
-                        )
-                        face_worker.start()
+                elif _vision_on:
+                    try:
+                        hands.close()
+                    except Exception:
+                        pass
+                    hands = _HandsStub()
+                if _vision_on and face_rec.enabled:
+                    face_worker = FaceWorker(
+                        face_rec, face_event_q, interval=face_worker_interval(),
+                        gate=lambda: state != "RECORDING",
+                    )
+                    face_worker.start()
                 log("OK", "카메라 연결됨 — 웹캠 활성화")
                 chat_log.add("system", "📷 카메라 연결됨")
 
@@ -2609,7 +2853,7 @@ def main():
             hud.push_audio_level(0)
 
         cg="NONE"; gc=False
-        if _vision_on:
+        if _hands_on:
             rgb=cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
             rgb.flags.writeable=False; results=hands.process(rgb); rgb.flags.writeable=True
             if results.multi_hand_landmarks:
@@ -2629,7 +2873,7 @@ def main():
             else: gesture_hold=0; last_gesture=cg
             gc=gesture_hold>=GESTURE_THRESHOLD
             vg_handler.observe(cg)
-            if _vision_on and gc and not gesture_ctrl.enabled:
+            if gc and not gesture_ctrl.enabled:
                 if vg_handler.handle(cg):
                     gesture_hold = 0
                     last_gesture = "NONE"
@@ -2638,8 +2882,8 @@ def main():
             if _g_evt:
                 log("INFO", f"HUD 제스처 → {_g_evt[0]} (radar={'ON' if _g_evt[1] else 'OFF'})")
 
-            if face_rec.enabled and state!="RECORDING":
-                face_worker.submit(frame)
+        if _vision_on and face_rec.enabled and state!="RECORDING":
+            face_worker.submit(frame)
 
         # ── 외출(자리비움) — 얼굴 인식 활성 시에만 자동 AWAY ──
         if _vision_on and face_rec.last_results:
@@ -2765,7 +3009,12 @@ def main():
                 break
 
         # ── 실시간 뉴스 이벤트 (호재/악재 감성 분석) ──
-        for nevt in news_analyzer.get_events():
+        news_events = news_analyzer.get_events()
+        if _boot_voice_quiet():
+            for _ne in news_events:
+                news_analyzer._enqueue(_ne)
+            news_events = []
+        for nevt in news_events:
             msg = nevt.get("message", "")
             if nevt.get("urgent"):
                 # 초강력 호재/악재(|score|>=7): TTS 인터럽트 + 테두리 깜빡임 + 표 + 즉시 긴급 브리핑.
@@ -2811,6 +3060,16 @@ def main():
             amsg = aevt.get("message", "")
             if not amsg:
                 continue
+            if aevt.get("source") == "price_alert":
+                try:
+                    from price_alert import technical_signal_alerts_enabled
+                except ImportError:
+                    technical_signal_alerts_enabled = lambda: False  # noqa: E731
+                if not technical_signal_alerts_enabled():
+                    continue
+            if _boot_voice_quiet():
+                price_alert.requeue(alert_events[idx:])
+                break
             # HUD 적색 펄스 배너 + 시그널 표 투사
             table = dict(aevt["overlay_table"]); table["alert_text"] = aevt["alert_text"]
             _push = f"🚨 매수 시그널 — {aevt['name']} ({aevt['triggers']})\n\n{amsg}"
@@ -2930,6 +3189,9 @@ def main():
                 chat_log.add("jarvis", smsg)
                 last_answer = smsg
                 continue
+            if _boot_voice_quiet():
+                stock_monitor.requeue(smon_events[idx:])
+                break
             if (not spoke_this_cycle and state=="IDLE"
                     and not player.is_playing and not tts_pipeline.is_playing):
                 log("INTR", f"🚨 주가 알림: {sevt['name']} ({sevt.get('condition','')})")
@@ -3069,6 +3331,10 @@ def main():
             if screen_only:
                 continue
 
+            if _boot_voice_quiet():
+                macro_guard.requeue(macro_events[idx:])
+                break
+
             if (gmsg and not spoke_this_cycle and state=="IDLE"
                     and not player.is_playing and not tts_pipeline.is_playing):
                 log("INTR", f"🚨 매크로 위험 격상 선제 브리핑 (이전={gevt.get('prev_level')})")
@@ -3092,6 +3358,9 @@ def main():
         cvf_events = cv_followup.get_events()
         for idx, cvevt in enumerate(cvf_events):
             cvmsg = cvevt.get("message", "")
+            if _boot_voice_quiet() and cvmsg:
+                cv_followup.requeue(cvf_events[idx:])
+                break
             if (cvmsg and not spoke_this_cycle and state=="IDLE"
                     and not player.is_playing and not tts_pipeline.is_playing):
                 log("INTR", f"🔎 교차검증 후속 브리핑: {cvevt.get('name','')}")
@@ -3111,7 +3380,7 @@ def main():
             _begin_recording()
 
         # ── 웨이크워드 트리거 ──
-        if wake.triggered and state=="IDLE":
+        if wake.triggered and state=="IDLE" and not power_save_active():
             wake.reset()
             idle_tracker.touch()
             state="RECORDING"
@@ -3125,7 +3394,7 @@ def main():
             # 오디오 재생 중엔 재개 금지 — TTS 에코가 웨이크워드로 오감지되는 것 방지
             if not player.is_playing and not tts_pipeline.is_playing:
                 wake.resume()
-            if _vision_on and not trained and not voice_auth_required():
+            if _hands_on and not trained and not voice_auth_required():
                 # 미학습: 주먹 제스처 녹음 시작 (음성 제스처 OFF일 때만)
                 if gc and cg=="FIST" and not voice_gestures_enabled():
                     state="RECORDING"; gesture_hold=0
@@ -3187,9 +3456,12 @@ def main():
         # ── 렌더링: 얼굴 → HUD → 채팅로그 → 오버레이 ──
         if face_rec.enabled:
             frame=face_rec.draw_faces(frame)
+        _cpu_hud = _mem_hud = None
+        if _resource_sampler is not None and _resource_sampler.ok():
+            _cpu_hud, _mem_hud = _resource_sampler.snapshot()
         frame=hud.render(frame, state=state, transcript=last_transcript,
                          answer=last_answer, face_count=len(face_rec.last_results) if face_rec.enabled else 0,
-                         llm_provider=LLM_PROVIDER)
+                         llm_provider=LLM_PROVIDER, cpu_pct=_cpu_hud, mem_pct=_mem_hud)
         frame=chat_log.render(frame)
         # 매크로 가드레일 등급 → HUD 전역 테마 색 동기화 (변경 시에만 갱신)
         _macro_level=macro_guard.current_level()
@@ -3199,7 +3471,17 @@ def main():
         frame=overlay.render(frame)
         frame=screen_kb.draw(frame)
         frame=draw_background_panel(frame, show_bg["on"])
-        frame=draw_help(frame, show_help["on"])
+        frame=draw_performance_panel(frame, show_perf["on"])
+        _fh, _fw = frame.shape[:2]
+        frame=draw_help(
+            frame, show_help["on"],
+            hud_state=state,
+            overlay_active=overlay.is_active,
+            overlay_rect=overlay.content_rect(_fw, _fh),
+            has_answer=bool(last_answer),
+            hands_enabled=_hands_on,
+        )
+        frame = draw_power_save_button(frame, power_save_active())
 
         # ── JARVIS Link: HUD/매트릭스/레이더 실시간 모바일 스트리밍(스로틀 ≈4Hz) ──
         _now=time.time()
@@ -3268,6 +3550,20 @@ def main():
             show_help["on"] = not show_help["on"]
         elif key in (ord("b"), ord("B")):
             show_bg["on"] = not show_bg["on"]
+        elif key in (ord("z"), ord("Z")):
+            on = not power_save_active()
+            msg = _apply_power_save(on)
+            chat_log.add("jarvis", msg)
+            log("INFO", msg)
+        elif key in (ord("p"), ord("P")):
+            show_perf["on"] = not show_perf["on"]
+            if show_perf["on"]:
+                chat_log.add("system", "⚙ 성능 패널 — 1 절전  2 균형  3 고품질")
+        elif show_perf["on"] and key in (ord("1"), ord("2"), ord("3")):
+            msg = handle_performance_key(key, True)
+            if msg:
+                chat_log.add("jarvis", msg)
+                log("INFO", msg)
         elif key==ord("q") or key==27:
             tts_pipeline.stop()
             if player.is_playing: player.stop()
@@ -3279,7 +3575,9 @@ def main():
         elif key==ord("d"): overlay.clear()
         elif key==ord("s"):
             # S키: 웹캠 차트 캡처 → Gemini 비전 기술적 분석 (대기 상태에서만)
-            if state=="IDLE" and not player.is_playing and not tts_pipeline.is_playing:
+            if power_save_active():
+                chat_log.add("system", "절전 모드 — 웹캠 OFF (Z키로 해제)")
+            elif state=="IDLE" and not player.is_playing and not tts_pipeline.is_playing:
                 state="PROCESSING"
                 wake.pause()  # 분석/브리핑 중 웨이크워드 비활성화
                 chat_log.add("system", "📸 차트 캡처 → 비전 기술분석 시작")
@@ -3322,8 +3620,8 @@ def main():
         elif key==ord("["): chat_log.scroll_up()     # [: 스크롤 위
         elif key==ord("]"): chat_log.scroll_down()   # ]: 스크롤 아래
         elif key==ord("g"):
-            if not _vision_on:
-                chat_log.add("system", "저사양 모드 — 제스처 비활성 (JARVIS_LOW_MEM=0)")
+            if not _hands_on:
+                chat_log.add("system", "손 인식 OFF — JARVIS_HANDS_ENABLED=1 후 재시작")
             else:
                 gesture_ctrl.enabled=not gesture_ctrl.enabled
                 status="ON" if gesture_ctrl.enabled else "OFF"
@@ -3396,12 +3694,10 @@ def main():
                 threading.Thread(target=_edit_thread,daemon=True).start()
             else:
                 chat_log.add("system","수정할 JARVIS 응답이 없습니다.")
-        elif key in (ord("p"), ord("P")):
-            chat_log.add("system", "💤 절전 모드 — 프로세스 종료 (JARVIS 앱 클릭 시 재기동)")
-            log("OK", "수동 절전 종료")
-            break
         elif key==32:  # 스페이스바
-            if state=="RECORDING":
+            if power_save_active():
+                chat_log.add("system", "절전 모드 — 음성 녹음 불가 (Enter·/ 또는 T키)")
+            elif state=="RECORDING":
                 # 녹음 중 → 수동 종료
                 state="PROCESSING"; wav=recorder.stop()
                 if wav: dispatch_processing(wav)
@@ -3444,7 +3740,16 @@ def main():
     stop_supply_chain_backend()
     if recorder._recording: recorder.stop()
     frame_reader.stop(); face_worker.stop()
-    hands.close(); cap.release(); cv2.destroyAllWindows()
+    try:
+        hands.close()
+    except Exception:
+        pass
+    if cap is not None:
+        try:
+            cap.release()
+        except Exception:
+            pass
+    cv2.destroyAllWindows()
     shutdown_process_pool()
     clear_pid()
     log("OK","v3.2 종료.")

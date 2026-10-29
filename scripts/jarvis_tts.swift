@@ -48,25 +48,30 @@ func pickVoice(pref: String, lang: String) -> AVSpeechSynthesisVoice? {
     let cands = voices(forLang: lang)
     if cands.isEmpty { return nil }
 
-    // 1) 식별자 정확 일치 (예: com.apple.voice.premium.ko-KR.Yuna)
+    // 1) 식별자 정확 일치 (예: com.apple.voice.premium.en-GB.Daniel)
     if pref.contains(".") {
         if let v = cands.first(where: { $0.identifier == pref }) { return v }
     }
 
-    let target = pref.isEmpty ? "Yuna" : pref
+    let defaultName = lang.lowercased().hasPrefix("ko") ? "Yuna" : "Daniel"
+    let target = pref.isEmpty ? defaultName : pref
     // 2) 이름에 target 을 '포함'하는 후보 중 최고 품질
-    //    (프리미엄/향상 음성은 이름이 "Yuna (Premium)" 처럼 접미사가 붙어 정확일치로는 놓친다)
+    //    (프리미엄/향상 음성은 이름이 "Daniel (Enhanced)" 처럼 접미사가 붙어 정확일치로는 놓친다)
     let named = cands.filter { $0.name.range(of: target, options: .caseInsensitive) != nil }
     let pool = named.isEmpty ? cands : named
 
-    func yunaish(_ v: AVSpeechSynthesisVoice) -> Int {
-        return v.name.range(of: "Yuna", options: .caseInsensitive) != nil ? 1 : 0
+    func preferredScore(_ v: AVSpeechSynthesisVoice) -> Int {
+        if v.name.range(of: target, options: .caseInsensitive) != nil { return 3 }
+        if v.name.range(of: "Daniel", options: .caseInsensitive) != nil { return 2 }
+        if v.name.range(of: "Samantha", options: .caseInsensitive) != nil { return 2 }
+        if v.name.range(of: "Yuna", options: .caseInsensitive) != nil { return 1 }
+        return 0
     }
-    // 품질 우선(premium>enhanced>default), 동률이면 Yuna 계열(한국 Siri 음성) 선호
+    // 품질 우선(premium>enhanced>default), 동률이면 선호 보이스 우선
     return pool.max { a, b in
         let qa = qualityRank(a), qb = qualityRank(b)
         if qa != qb { return qa < qb }
-        return yunaish(a) < yunaish(b)
+        return preferredScore(a) < preferredScore(b)
     }
 }
 
@@ -80,7 +85,7 @@ func popValue(_ flag: String) -> String? {
 }
 let wantList = args.contains("--list")
 
-let lang = popValue("--lang") ?? "ko-KR"
+let lang = popValue("--lang") ?? "en-GB"
 
 if wantList {
     for v in voices(forLang: lang).sorted(by: { qualityRank($0) > qualityRank($1) }) {
@@ -90,7 +95,7 @@ if wantList {
 }
 
 let outPath = popValue("--out")
-let voicePref = popValue("--voice") ?? "Yuna"
+let voicePref = popValue("--voice") ?? (lang.lowercased().hasPrefix("ko") ? "Yuna" : "Daniel")
 let rateStr = popValue("--rate")
 var text = popValue("--text")
 if let tf = popValue("--textfile") {

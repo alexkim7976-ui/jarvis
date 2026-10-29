@@ -112,7 +112,7 @@ return outText
         return {"success": False, "message": f"캘린더 조회 실패: {out}"}
 
     events = _parse_event_lines(out, include_end=False)[: int(max_results)]
-    msg = f"{date} 일정 {len(events)}개입니다." if events else f"{date}에 일정이 없습니다."
+    msg = f"You have {len(events)} events for {date}." if events else f"You have no scheduled events for {date}."
     return {
         "success": True, "date": date, "count": len(events), "events": events,
         "message": msg, "backend": "mac_calendar",
@@ -163,7 +163,7 @@ return outText
         "success": True,
         "count": len(events),
         "events": events,
-        "message": f"다가오는 일정 {len(events)}개입니다." if events else "다가오는 일정이 없습니다.",
+        "message": f"You have {len(events)} upcoming events." if events else "You have no upcoming events.",
         "backend": "mac_calendar",
     }
 
@@ -204,7 +204,7 @@ return outText
         "success": True,
         "count": len(items),
         "reminders": items,
-        "message": f"미완료 미리알림 {len(items)}개입니다." if items else "미완료 미리알림이 없습니다.",
+        "message": f"You have {len(items)} incomplete reminders." if items else "You have no incomplete reminders.",
         "backend": "mac_reminders",
     }
 

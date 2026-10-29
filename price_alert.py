@@ -28,10 +28,14 @@ from collections import deque
 from datetime import datetime
 
 try:
-    import yfinance as yf
-    YF_AVAILABLE = True
+    from stock_quant import YF_AVAILABLE, yf
 except ImportError:
-    YF_AVAILABLE = False
+    try:
+        import yfinance as yf
+        YF_AVAILABLE = True
+    except ImportError:
+        YF_AVAILABLE = False
+        yf = None
 
 # stock_quant 의 지표 스냅샷 + 티커 변환 + 종목명 해석 재사용
 from stock_quant import (compute_technical_snapshot, _resolve_ticker,
@@ -69,6 +73,13 @@ WATCH_LIST           = _parse_watch_list(os.getenv("WATCH_LIST", os.getenv("NEWS
 PRICE_ALERT_INTERVAL = int(os.getenv("PRICE_ALERT_INTERVAL", "60"))     # 초 (기본 1분)
 PRICE_ALERT_COOLDOWN = int(os.getenv("PRICE_ALERT_COOLDOWN", "3600"))   # 초 (기본 1시간)
 RSI_OVERSOLD         = float(os.getenv("RSI_OVERSOLD", "30"))
+
+
+def technical_signal_alerts_enabled() -> bool:
+    """RSI/볼린저 매수 시그널 — HUD·음성 자동 알림 (기본 OFF, 목표가 알림은 별도)."""
+    return os.getenv("JARVIS_WATCHLIST_SIGNAL_ALERT", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 _KR_NAME_MAP = {
     "005930.KS": "삼성전자", "000660.KS": "SK하이닉스", "035420.KS": "NAVER",
@@ -334,6 +345,9 @@ class PriceAlertWorker:
             triggers.append(("볼린저 하단 돌파", f"현재가 {price:,.2f} ≤ BB_Low {bb_lower:,.2f}"))
 
         if not triggers:
+            return
+
+        if not technical_signal_alerts_enabled():
             return
 
         # 쿨다운 설정 (1시간)

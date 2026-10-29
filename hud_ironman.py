@@ -45,14 +45,17 @@ class IronManHUD:
             self._audio_levels.pop(0)
             self._audio_levels.append(min(int(rms), 8000))
 
-    def render(self, frame, state="IDLE", transcript="", answer="", face_count=0, llm_provider="gemini"):
+    def render(self, frame, state="IDLE", transcript="", answer="", face_count=0, llm_provider="gemini",
+               cpu_pct: float | None = None, mem_pct: float | None = None):
         self._frame_count+=1; h,w=frame.shape[:2]; t=time.time()
+        self._live_cpu = cpu_pct
+        self._live_mem = mem_pct
         # PROCESSING 진입 시점 기록 → 경과시간 계산(오래 걸려도 진행 중임을 안심시키기)
         if state=="PROCESSING" and self._prev_state!="PROCESSING":
             self._proc_start=t
         self._prev_state=state
         tint=np.zeros_like(frame); tint[:]=(12,8,4)
-        cv2.addWeighted(frame,0.92,tint,0.08,0,frame)
+        cv2.addWeighted(frame,0.94,tint,0.06,0,frame)
         self._draw_scan_line(frame,h,w)
         self._draw_corner_frame(frame,h,w)
         self._draw_top_bar(frame,w,state,llm_provider)
@@ -79,7 +82,7 @@ class IronManHUD:
         # 반투명 앰버 패널
         ov=frame.copy()
         cv2.rectangle(ov,(x0,y0),(x0+bw,y0+bh),(20,15,5),-1)
-        cv2.addWeighted(ov,0.66,frame,0.34,0,frame)
+        cv2.addWeighted(ov,0.58,frame,0.42,0,frame)
         cv2.rectangle(frame,(x0,y0),(x0+bw,y0+bh),AMBER,1,cv2.LINE_AA)
         # 좌측 회전 스피너
         sc=(x0+30,y0+bh//2); a=int(t*300)%360
@@ -87,8 +90,8 @@ class IronManHUD:
         cv2.ellipse(frame,sc,(13,13),0,a,a+270,AMBER,2,cv2.LINE_AA)
         # 점(...) 애니메이션 텍스트
         dots="."*((int(t*2)%3)+1)
-        put_text(frame,f"분석 처리 중{dots}",(x0+56,y0+26),size=19,color=(0,220,255),bold=True)
-        put_text(frame,f"경과 {elapsed:0.0f}초 · 잠시만 기다려 주세요",
+        put_text(frame,f"Analyzing{dots}",(x0+56,y0+26),size=19,color=(0,220,255),bold=True)
+        put_text(frame,f"Elapsed {elapsed:0.0f}s · Please wait a moment",
                  (x0+56,y0+50),size=13,color=(0,200,255))
         return frame
 
@@ -160,17 +163,27 @@ class IronManHUD:
     def _draw_status_panel(self,frame,h,w,state,fc):
         px=w-180; py=60; ov=frame.copy()
         cv2.rectangle(ov,(px-10,py),(w-10,py+160),PANEL_BG,-1)
-        cv2.addWeighted(ov,0.55,frame,0.45,0,frame)
+        cv2.addWeighted(ov,0.48,frame,0.52,0,frame)
         cv2.line(frame,(px-10,py),(px-10,py+160),CYAN_DARK,1,cv2.LINE_AA)
         y=py+18; cv2.putText(frame,"SYSTEM STATUS",(px,y),cv2.FONT_HERSHEY_SIMPLEX,0.32,CYAN,1,cv2.LINE_AA)
         y+=8; cv2.line(frame,(px,y),(w-15,y),CYAN_DARK,1)
         y+=20; ut=int(time.time()-self._boot_time); m,s=divmod(ut,60); hr,m=divmod(m,60)
         cv2.putText(frame,"UPTIME",(px,y),cv2.FONT_HERSHEY_SIMPLEX,0.28,CYAN_DIM,1,cv2.LINE_AA)
         cv2.putText(frame,f"{hr:02d}:{m:02d}:{s:02d}",(px+65,y),cv2.FONT_HERSHEY_SIMPLEX,0.30,CYAN,1,cv2.LINE_AA)
-        y+=22; cv2.putText(frame,"STT",(px,y),cv2.FONT_HERSHEY_SIMPLEX,0.28,CYAN_DIM,1,cv2.LINE_AA)
-        cv2.putText(frame,"WHISPER",(px+65,y),cv2.FONT_HERSHEY_SIMPLEX,0.30,GREEN,1,cv2.LINE_AA)
-        y+=22; cv2.putText(frame,"TTS",(px,y),cv2.FONT_HERSHEY_SIMPLEX,0.28,CYAN_DIM,1,cv2.LINE_AA)
-        cv2.putText(frame,"SIRI",(px+65,y),cv2.FONT_HERSHEY_SIMPLEX,0.30,GREEN,1,cv2.LINE_AA)
+        cpu_v = getattr(self, "_live_cpu", None)
+        mem_v = getattr(self, "_live_mem", None)
+        y += 22
+        cv2.putText(frame, "CPU", (px, y), cv2.FONT_HERSHEY_SIMPLEX, 0.28, CYAN_DIM, 1, cv2.LINE_AA)
+        cpu_txt = f"{cpu_v:.0f}%" if cpu_v is not None else "—"
+        cpu_col = GREEN if cpu_v is not None and cpu_v < 70 else (
+            AMBER if cpu_v is not None and cpu_v < 90 else RED_ALERT)
+        cv2.putText(frame, cpu_txt, (px + 65, y), cv2.FONT_HERSHEY_SIMPLEX, 0.30, cpu_col, 1, cv2.LINE_AA)
+        y += 22
+        cv2.putText(frame, "RAM", (px, y), cv2.FONT_HERSHEY_SIMPLEX, 0.28, CYAN_DIM, 1, cv2.LINE_AA)
+        mem_txt = f"{mem_v:.0f}%" if mem_v is not None else "—"
+        mem_col = GREEN if mem_v is not None and mem_v < 75 else (
+            AMBER if mem_v is not None and mem_v < 90 else RED_ALERT)
+        cv2.putText(frame, mem_txt, (px + 65, y), cv2.FONT_HERSHEY_SIMPLEX, 0.30, mem_col, 1, cv2.LINE_AA)
         y+=22; cv2.putText(frame,"FACES",(px,y),cv2.FONT_HERSHEY_SIMPLEX,0.28,CYAN_DIM,1,cv2.LINE_AA)
         cv2.putText(frame,str(fc),(px+65,y),cv2.FONT_HERSHEY_SIMPLEX,0.30,GREEN if fc>0 else CYAN_DIM,1,cv2.LINE_AA)
         y+=22; cv2.putText(frame,"FRAME",(px,y),cv2.FONT_HERSHEY_SIMPLEX,0.28,CYAN_DIM,1,cv2.LINE_AA)
@@ -222,7 +235,11 @@ class IronManHUD:
             cv2.circle(frame,(px,py),p["size"],c,-1,cv2.LINE_AA)
 
     def _draw_system_info(self,frame,h,w):
-        for i,(l,v) in enumerate([("CAM","1280x720"),("MIC","16kHz"),("NET","ONLINE")]):
+        cpu_v = getattr(self, "_live_cpu", None)
+        mem_v = getattr(self, "_live_mem", None)
+        cpu_s = f"{cpu_v:.0f}%" if cpu_v is not None else "…"
+        mem_s = f"{mem_v:.0f}%" if mem_v is not None else "…"
+        for i, (l, v) in enumerate([("CPU", cpu_s), ("RAM", mem_s), ("NET", "ONLINE")]):
             y=60+i*18
             cv2.putText(frame,l,(15,y),cv2.FONT_HERSHEY_SIMPLEX,0.28,CYAN_DARK,1,cv2.LINE_AA)
             cv2.putText(frame,v,(50,y),cv2.FONT_HERSHEY_SIMPLEX,0.28,CYAN_DIM,1,cv2.LINE_AA)

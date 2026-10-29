@@ -9,15 +9,27 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
+import importlib.util
 import cv2
 import numpy as np
 
-# face_recognition 라이브러리 (없으면 폴백)
-try:
-    import face_recognition
-    FACE_LIB_AVAILABLE = True
-except ImportError:
-    FACE_LIB_AVAILABLE = False
+# face_recognition 라이브러리 (지연 로드 — 실제 인식/등록 호출 시점에 dlib 로드)
+FACE_LIB_AVAILABLE = importlib.util.find_spec("face_recognition") is not None
+
+class _LazyFaceRecognition:
+    def __init__(self):
+        self._mod = None
+
+    def _load(self):
+        if self._mod is None:
+            import face_recognition as _fr
+            self._mod = _fr
+        return self._mod
+
+    def __getattr__(self, name: str):
+        return getattr(self._load(), name)
+
+face_recognition = _LazyFaceRecognition() if FACE_LIB_AVAILABLE else None
 
 FACES_DIR = Path("faces")
 FACES_DIR.mkdir(exist_ok=True)
@@ -169,9 +181,9 @@ class FaceRecognizer:
                     self.events.append({
                         "type": "warn",
                         "name": "Unknown",
-                        "message": f"{USER_DISPLAY_NAME}, 등록되지 않은 인물이 감지되었습니다. 주의가 필요합니다.",
+                        "message": f"{USER_DISPLAY_NAME}, an unregistered person has been detected. Please be advised.",
                     })
-                    self._log("FACE", "⚠ 미등록 인물 감지")
+                    self._log("FACE", "⚠ Unregistered person detected")
                     break
             else:
                 if name in ("Detected", ""):
@@ -180,13 +192,12 @@ class FaceRecognizer:
                 last_greet = self._greeted.get(name, 0)
                 if now - last_greet > self.GREET_COOLDOWN:
                     self._greeted[name] = now
-                    # 현지(IP 기반) 시각으로 아침/낮/저녁/밤 구분 — 시스템 시간이 아닌 사용자 위치 기준
                     try:
                         from weather_module import local_time_greeting, local_offset_cached
                         greet, _, _ = local_time_greeting(local_offset_cached())
                     except Exception:
                         h = datetime.now().hour
-                        greet = "좋은 아침입니다" if h < 12 else ("안녕하세요" if h < 18 else "좋은 저녁입니다")
+                        greet = "Good morning" if h < 12 else ("Good afternoon" if h < 18 else "Good evening")
                     display = USER_DISPLAY_NAME if name in ("Owner", "Boss") else name
                     greeting = f"{greet}, {display}."
                     self.events.append({
@@ -194,7 +205,7 @@ class FaceRecognizer:
                         "name": name,
                         "message": greeting,
                     })
-                    self._log("FACE", f"✓ {name} 인식 → 인사")
+                    self._log("FACE", f"✓ {name} recognized -> greeting")
 
         return results
 

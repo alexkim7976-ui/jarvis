@@ -23,16 +23,34 @@ import statistics
 import unicodedata
 from datetime import datetime, timedelta
 
+import importlib.util
 import numpy as np
-import pandas as pd
 
-try:
-    import yfinance as yf
-    YF_AVAILABLE = True
-    # 야후 조회 실패(404 / delisted) 시 터미널을 도배하는 노이즈 로그 억제
+class _LazyModuleProxy:
+    """Lazy module loader so pandas/yfinance are only imported when stock data is accessed."""
+    def __init__(self, mod_name: str, on_load=None):
+        self._mod_name = mod_name
+        self._mod = None
+        self._on_load = on_load
+
+    def _load(self):
+        if self._mod is None:
+            import importlib
+            self._mod = importlib.import_module(self._mod_name)
+            if self._on_load is not None:
+                self._on_load(self._mod)
+        return self._mod
+
+    def __getattr__(self, name: str):
+        return getattr(self._load(), name)
+
+pd = _LazyModuleProxy("pandas")
+
+def _on_yf_loaded(_mod):
     logging.getLogger("yfinance").setLevel(logging.CRITICAL)
-except ImportError:
-    YF_AVAILABLE = False
+
+YF_AVAILABLE = importlib.util.find_spec("yfinance") is not None
+yf = _LazyModuleProxy("yfinance", on_load=_on_yf_loaded) if YF_AVAILABLE else None
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

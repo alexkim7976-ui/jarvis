@@ -35,10 +35,14 @@ from collections import deque
 from difflib import SequenceMatcher
 
 try:
-    import yfinance as yf
-    YF_AVAILABLE = True
+    from stock_quant import YF_AVAILABLE, yf
 except ImportError:
-    YF_AVAILABLE = False
+    try:
+        import yfinance as yf
+        YF_AVAILABLE = True
+    except ImportError:
+        YF_AVAILABLE = False
+        yf = None
 
 import requests
 try:
