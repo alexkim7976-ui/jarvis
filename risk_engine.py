@@ -58,6 +58,16 @@ _inflight: set = set()
 _EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="risk-mc")
 
 
+def shutdown_executor() -> None:
+    """앱 종료 시 ThreadPoolExecutor가 파이썬 인터프리터 종료를 붙잡지 않도록 즉시 해제."""
+    try:
+        _EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    except TypeError:
+        _EXECUTOR.shutdown(wait=False)
+    except Exception:
+        pass
+
+
 # ════════════════════════════════════════════════════════════════════
 #  유틸
 # ════════════════════════════════════════════════════════════════════

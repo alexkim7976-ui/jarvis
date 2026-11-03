@@ -41,7 +41,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 def _default_root() -> Path:
     env = os.getenv("JARVIS_SANDBOX_ROOT", "").strip()
-    base = Path(env).expanduser() if env else (PROJECT_ROOT / "data" / "sandbox")
+    if env:
+        return Path(env).expanduser().resolve()
+    dd = (os.getenv("JARVIS_DATA_DIR") or "").strip()
+    base = (Path(dd).expanduser() / "data" / "sandbox") if dd else (PROJECT_ROOT / "data" / "sandbox")
     return base.resolve()
 
 

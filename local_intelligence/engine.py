@@ -332,7 +332,7 @@ def build_compact_context(ctx: dict[str, Any]) -> str:
 
 
 def build_rule_based_narrative(ctx: dict[str, Any]) -> str:
-    """Ollama 불가 시 deterministic 전문 브리핑 — Gemini 0."""
+    """Deterministic English briefing when Ollama is unavailable — Gemini 0."""
     nm = ctx.get("name") or ctx.get("ticker")
     vp = ctx.get("volume_profile") or {}
     rb = ctx.get("ma_ribbon") or {}
@@ -341,71 +341,59 @@ def build_rule_based_narrative(ctx: dict[str, Any]) -> str:
     dcf = ctx.get("dcf_valuation") or {}
     gr = ctx.get("graham_valuation") or {}
 
-    trend = rb.get("signal") or "이평선 중립"
-    vp_txt = vp.get("signal") or "매물대 데이터 제한"
     val_score = val.get("score", 50)
-    val_grade = val.get("grade", "중립")
+    val_grade = val.get("grade", "NEUTRAL")
     matrix = mx.get("local_matrix_score", ctx.get("hybrid_score", 50))
 
     dcf_txt = ""
     if dcf.get("fair_price") is not None:
         mos = dcf.get("margin_of_safety_pct")
         dcf_txt = (
-            f" DCF 기준 적정 주가는 ${dcf['fair_price']:.2f}이며, "
-            f"현재가 대비 안전마진은 {mos:+.1f}%입니다."
+            f" The DCF fair value is ${dcf['fair_price']:.2f} with a margin of safety of {mos:+.1f}%."
             if mos is not None else
-            f" DCF 기준 적정 주가는 ${dcf['fair_price']:.2f}입니다."
+            f" The DCF fair value is ${dcf['fair_price']:.2f}."
         )
 
     gr_txt = ""
     if gr.get("intrinsic_value") is not None:
         uv = gr.get("undervaluation_pct")
         gr_txt = (
-            f" 그레이엄 내재가치 ${gr['intrinsic_value']:.2f}, 저평가율 {uv:+.1f}%입니다."
+            f" Graham intrinsic value is ${gr['intrinsic_value']:.2f} ({uv:+.1f}% undervaluation)."
             if uv is not None else
-            f" 그레이엄 내재가치 ${gr['intrinsic_value']:.2f}입니다."
+            f" Graham intrinsic value is ${gr['intrinsic_value']:.2f}."
         )
 
     sent_txt = ""
-    if ctx.get("sentiment_golden_cross") and ctx.get("sentiment_divergence_signal"):
-        sent_txt = (
-            " 현재 주가는 바닥을 기고 있으나 뉴스 심리 모멘텀은 먼저 골든크로스를 그리며 "
-            f"{ctx['sentiment_divergence_signal']}를 보이고 있습니다."
-        )
-    elif ctx.get("sentiment_golden_cross"):
-        sent_txt = " 뉴스 감성 MA5가 MA20을 상방 돌파하는 골든크로스가 확인됩니다."
-    elif ctx.get("sentiment_divergence_signal"):
-        sent_txt = f" {ctx['sentiment_divergence_signal']}."
+    if ctx.get("sentiment_golden_cross"):
+        sent_txt = " News sentiment MA5 has crossed above MA20, forming a golden cross."
 
     stress_txt = ""
     st = ctx.get("stress_test_profile") or {}
     worst = st.get("worst") or {}
     if worst.get("expected_mdd_pct") is not None:
         stress_txt = (
-            f" 만약 {worst.get('label', '역사적 위기')}급 위기가 현재 포트폴리오에 재현된다면, "
-            f"예상 최대 낙폭(MDD)은 {worst['expected_mdd_pct']:.1f}%, "
-            f"VaR(95%)는 {worst.get('var_95_pct', 0):.1f}%입니다."
+            f" Under a severe stress scenario, expected max drawdown is {worst['expected_mdd_pct']:.1f}% "
+            f"with a 95% VaR of {worst.get('var_95_pct', 0):.1f}%."
         )
 
     price = ctx.get("consensus_price")
     cp = ctx.get("change_pct")
-    price_txt = f"합의가 {price}" if price else "가격 제한"
-    ch_txt = f", 전일대비 {cp:+.1f}%" if cp is not None else ""
+    price_txt = f"consensus price is {price}" if price else "price data is limited"
+    ch_txt = f" ({cp:+.1f}% vs. previous close)" if cp is not None else ""
 
     return (
-        f"{nm} 쪽 봤는데요, {price_txt}{ch_txt}. "
-        f"{trend}. {vp_txt}. "
-        f"재무 안정성 점수는 {val_score}점({val_grade})이고, "
-        f"종합 매트릭스는 {matrix}/100({mx.get('grade', 'HOLD')}) 정도예요."
+        f"Here is the analysis for {nm}: {price_txt}{ch_txt}. "
+        f"Financial stability scores {val_score} out of 100 ({val_grade}), and "
+        f"the composite matrix score is {matrix} out of 100 ({mx.get('grade', 'HOLD')})."
         f"{dcf_txt}{gr_txt}{sent_txt}{stress_txt}"
     )
 
 
-_OLLAMA_NARRATIVE_PROMPT = """Apple Silicon 로컬 퀀트 애널리스트. 음성으로 읽힐 한국어 답변.
+_OLLAMA_NARRATIVE_PROMPT = """Apple Silicon local quant analyst. Provide a spoken English briefing.
 
-말투: 부드럽고 자연스러운 한국어 존댓말/해요체 (~예요/~해요/~네요/~죠). 반말 금지, 딱딱한 ~습니다체·번역투·번호 목록도 금지.
+Style: Natural, calm, articulate English (3 to 5 sentences) suitable for J.A.R.V.I.S. voice output. No bullet points or numbered lists.
 
-[로컬 지표 스냅샷]
+[Local Metrics Snapshot]
 {context}
 """
 

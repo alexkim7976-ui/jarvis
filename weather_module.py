@@ -15,13 +15,22 @@ except Exception:
 
 WEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "")
 
+
+def weather_api_enabled() -> bool:
+    """OpenWeather 날씨 API — 기본 OFF (JARVIS_WEATHER_ENABLED=1 일 때만)."""
+    return os.getenv("JARVIS_WEATHER_ENABLED", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
 _USER_LOC_FILE = Path(os.getenv("JARVIS_USER_LOCATION_FILE", "data/user_location.json"))
 
 
 def _user_loc_path() -> Path:
     p = _USER_LOC_FILE
     if not p.is_absolute():
-        p = Path(__file__).resolve().parent / p
+        dd = (os.getenv("JARVIS_DATA_DIR") or "").strip()
+        base = Path(dd).expanduser() if dd else Path(__file__).resolve().parent
+        p = base / p
     return p
 
 
@@ -90,9 +99,9 @@ def extract_city_from_text(text: str) -> str:
 def format_weather_line(city: str) -> str:
     w = get_current_weather(city)
     if not w.get("success"):
-        return w.get("message", "날씨 정보를 가져오지 못했습니다.")
+        return w.get("message", "Unable to retrieve weather information.")
     name = w.get("city") or city
-    return f"{name} 날씨는 {w.get('weather', '')}, 기온 {w.get('temperature', '')}입니다."
+    return f"The weather in {name} is {w.get('weather', '')} with a temperature of {w.get('temperature', '')}."
 
 
 def format_where_from_loc(loc: dict) -> str:
@@ -120,72 +129,112 @@ def resolve_auto_location(*, refresh: bool = False) -> dict | None:
     return loc
 
 
+def _fast_boot_enabled() -> bool:
+    return os.getenv("JARVIS_FAST_BOOT", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def build_fast_startup_greeting() -> str:
+    """Immediate greeting — local system time without waiting for network/GPS."""
+    from i18n import tr
+    greet, time_str, label = local_time_greeting(None)
+    return tr("fast_greeting_tpl", greet=greet, time_str=time_str)
+
+
+def build_location_weather_followup(*, try_gps: bool = True) -> str:
+    """Location and local time follow-up after fast greeting."""
+    from i18n import tr
+    loc = None
+    if try_gps and device_location_enabled():
+        try:
+            t = float(os.getenv("JARVIS_LOCATION_TIMEOUT", "2.5"))
+            loc = get_device_location(timeout=t)
+        except (TypeError, ValueError):
+            loc = get_device_location()
+        except Exception:
+            loc = None
+    if not loc or not (loc.get("city") or loc.get("region")):
+        try:
+            loc = get_location_by_ip()
+        except Exception:
+            loc = None
+    if not loc or not (loc.get("city") or loc.get("region")):
+        loc = resolve_auto_location(refresh=False)
+    _, time_str, label = local_time_greeting(loc.get("offset") if loc else None)
+    parts: list[str] = []
+    where = format_where_from_loc(loc) if loc else ""
+    if where:
+        parts.append(tr("location_followup_tpl", where=where, time_str=time_str))
+        if weather_api_enabled() and WEATHER_API_KEY:
+            city = (loc.get("city") or loc.get("region") or "").strip()
+            if city:
+                parts.append(format_weather_line(city))
+    if not parts:
+        return ""
+    return " ".join(parts)
+
+
 def build_auto_startup_briefing() -> str:
-    """부팅 인사 — 자동 감지 위치 + 현지 시각 + 날씨."""
+    """Boot greeting — auto-detected location + local time."""
+    from i18n import tr
     loc = resolve_auto_location(refresh=True)
     greet, time_str, label = local_time_greeting(loc.get("offset") if loc else None)
     parts: list[str] = [f"{greet}."]
     where = format_where_from_loc(loc) if loc else ""
     if where:
-        parts.append(f"현재 위치는 {where}입니다.")
-        parts.append(f"현지 시각은 {time_str}, {label} 시간이에요.")
-        city = (loc.get("city") or loc.get("region") or "").strip()
-        if city and WEATHER_API_KEY:
-            parts.append(format_weather_line(city))
-        elif not WEATHER_API_KEY:
-            parts.append("날씨 API 키가 없어 기온은 생략합니다.")
+        parts.append(tr("location_followup_tpl", where=where, time_str=time_str))
+        if weather_api_enabled() and WEATHER_API_KEY:
+            city = (loc.get("city") or loc.get("region") or "").strip()
+            if city:
+                parts.append(format_weather_line(city))
     else:
-        parts.append(f"위치를 자동으로 확인하지 못했습니다. 현지 시각은 {time_str}, {label} 시간이에요.")
-        parts.append("시스템 설정에서 위치 서비스와 JARVIS 위치 권한을 확인해 주세요.")
+        parts.append(tr("location_unknown_tpl", time_str=time_str))
     return " ".join(parts)
 
 
 def build_location_weather_briefing(city: str, *, include_greet: bool = True) -> str:
-    """현재 위치 확인 + 도시 날씨 한 문단."""
+    """Location and local time briefing for a saved city."""
     c = (city or "").strip()
     if not c:
-        return "도시 이름을 알려주시면 위치와 날씨를 안내해 드릴게요."
+        return "Please tell me your city and I will provide your location and local time."
     greet, time_str, label = local_time_greeting(None)
     parts: list[str] = []
     if include_greet:
         parts.append(f"{greet}.")
-    parts.append(f"현재 위치는 {c}입니다.")
-    parts.append(f"현지 시각은 {time_str}, {label} 시간이에요.")
-    if WEATHER_API_KEY:
+    parts.append(f"Your current location is {c}.")
+    parts.append(f"The local time is {time_str}.")
+    if weather_api_enabled() and WEATHER_API_KEY:
         parts.append(format_weather_line(c))
-    else:
-        parts.append("날씨 API 키가 없어 기온은 생략합니다.")
     return " ".join(parts)
 
 
 def startup_location_prompt() -> str:
-    """첫 실행 — 도시 입력 요청."""
+    """First-run prompt asking for city."""
     greet, _, _ = local_time_greeting(None)
     return (
-        f"{greet}. 도시 날씨를 알려드리려면 현재 계신 도시를 말씀해 주세요. "
-        f"예를 들어 서울, 부천, Stony Brook 처럼 말씀하시면 됩니다."
+        f"{greet}. Please tell me which city you are in so I can set your local time. "
+        f"For example, you can say Seoul, New York, or Stony Brook."
     )
 
 
 # 날씨 아이콘 → 텍스트 매핑
 WEATHER_ICONS = {
-    "01d": "☀ 맑음", "01n": "🌙 맑음",
-    "02d": "⛅ 구름 조금", "02n": "☁ 구름 조금",
-    "03d": "☁ 구름 많음", "03n": "☁ 구름 많음",
-    "04d": "☁ 흐림", "04n": "☁ 흐림",
-    "09d": "🌧 소나기", "09n": "🌧 소나기",
-    "10d": "🌦 비", "10n": "🌧 비",
-    "11d": "⛈ 뇌우", "11n": "⛈ 뇌우",
-    "13d": "🌨 눈", "13n": "🌨 눈",
-    "50d": "🌫 안개", "50n": "🌫 안개",
+    "01d": "☀ Clear", "01n": "🌙 Clear",
+    "02d": "⛅ Partly Cloudy", "02n": "☁ Partly Cloudy",
+    "03d": "☁ Mostly Cloudy", "03n": "☁ Mostly Cloudy",
+    "04d": "☁ Overcast", "04n": "☁ Overcast",
+    "09d": "🌧 Showers", "09n": "🌧 Showers",
+    "10d": "🌦 Rain", "10n": "🌧 Rain",
+    "11d": "⛈ Thunderstorm", "11n": "⛈ Thunderstorm",
+    "13d": "🌨 Snow", "13n": "🌨 Snow",
+    "50d": "🌫 Fog", "50n": "🌫 Fog",
 }
 
 # 풍향 변환
 def wind_direction(deg):
-    dirs = ["북", "북북동", "북동", "동북동",
-            "동", "동남동", "남동", "남남동",
-            "남", "남남서", "남서", "서남서",
-            "서", "서북서", "북서", "북북서"]
+    dirs = ["N", "NNE", "NE", "ENE",
+            "E", "ESE", "SE", "SSE",
+            "S", "SSW", "SW", "WSW",
+            "W", "WNW", "NW", "NNW"]
     idx = round(deg / 22.5) % 16
     return dirs[idx]
 
@@ -212,9 +261,8 @@ def get_location_by_ip():
     return None
 
 
-def reverse_geocode(lat, lon, lang="ko"):
-    """위도/경도 → 도시/지역/국가. BigDataCloud reverse-geocode-client(키 불필요).
-    실패 시 None. offset은 미제공이므로 None(=시스템 로컬 시간 사용, 사용자 Mac 시각이 곧 현지 시각)."""
+def reverse_geocode(lat, lon, lang="en"):
+    """Latitude/longitude -> city/region/country via BigDataCloud reverse-geocode-client."""
     try:
         d = net.get("https://api.bigdatacloud.net/data/reverse-geocode-client",
                     params={"latitude": lat, "longitude": lon, "localityLanguage": lang},
@@ -230,15 +278,14 @@ def reverse_geocode(lat, lon, lang="ko"):
         return None
 
 
-def get_device_location():
-    """macOS CoreLocation 기기 실제 위치(WiFi/GPS) → 한국어 역지오코딩.
-    IP 방식과 달리 시/구 단위로 정확. 권한 없음/미지원/실패 시 None → 호출부가 IP 폴백."""
+def get_device_location(*, timeout: float | None = None):
+    """macOS CoreLocation device coordinates -> English reverse geocoding."""
     try:
         from mac_location import get_device_coordinates
     except Exception:
         return None
     try:
-        coords = get_device_coordinates()
+        coords = get_device_coordinates(timeout=timeout)
     except Exception:
         coords = None
     if not coords:
@@ -248,19 +295,20 @@ def get_device_location():
 
 
 def local_time_greeting(offset_seconds=None):
-    """현지 시각 기준 (인사말, 시각문자열, 시간대라벨) 반환. offset 없으면 시스템 로컬 시간 사용."""
+    """Return (greeting, time_string, period_label) in the active language."""
+    from i18n import tr
     if offset_seconds is None:
         now = datetime.now()
     else:
         now = datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)
     h = now.hour
-    if   5 <= h < 11:  greet, label = "좋은 아침입니다", "아침"
-    elif 11 <= h < 17: greet, label = "안녕하세요", "낮"
-    elif 17 <= h < 22: greet, label = "좋은 저녁입니다", "저녁"
-    else:              greet, label = "늦은 시간입니다", "밤"
-    ampm = "오전" if h < 12 else "오후"
+    if   5 <= h < 12:  greet, label = tr("greet_morning"), "morning"
+    elif 12 <= h < 17: greet, label = tr("greet_afternoon"), "afternoon"
+    elif 17 <= h < 22: greet, label = tr("greet_evening"), "evening"
+    else:              greet, label = tr("greet_evening"), "night"
+    ampm = "AM" if h < 12 else "PM"
     h12 = h % 12 or 12
-    return greet, f"{ampm} {h12}시 {now.minute:02d}분", label
+    return greet, f"{h12}:{now.minute:02d} {ampm}", label
 
 
 # IP 위치 1회 조회 캐시 — 얼굴 인사처럼 반복 호출되는 경로가 매번 네트워크를 타지 않도록
@@ -440,16 +488,16 @@ def get_weather_forecast(city, units="metric", lang="kr", days=3):
 
 
 def get_current_location():
-    """사용자의 현재 위치(도시/지역/국가)와 현지 시각 — GPS/IP 자동 감지."""
+    """Return user's current location (city/region/country) and local time."""
     loc = resolve_auto_location(refresh=True)
     if not loc:
         return {"success": False,
-                "message": "현재 위치를 확인하지 못했습니다. 시스템 설정 → 개인정보 → 위치에서 JARVIS를 허용해 주세요."}
+                "message": "Could not determine your current location. Please allow JARVIS in System Settings -> Privacy & Security -> Location Services."}
     city = (loc.get("city") or "").strip()
     region = (loc.get("region") or "").strip()
     country = (loc.get("country") or "").strip()
     parts = [p for p in (city, region, country) if p]
-    where = ", ".join(parts) if parts else "알 수 없음"
+    where = ", ".join(parts) if parts else "Unknown"
     _, time_str, _ = local_time_greeting(loc.get("offset"))
     return {
         "success": True,
@@ -457,7 +505,7 @@ def get_current_location():
         "timezone": loc.get("timezone", ""),
         "location": where,
         "local_time": time_str,
-        "message": f"현재 위치는 {where}이며, 현지 시각은 {time_str}입니다.",
+        "message": f"Your current location is {where}, and the local time is {time_str}.",
     }
 
 
@@ -465,32 +513,29 @@ def get_current_location():
 #  LLM 도구 정의
 # ──────────────────────────────────────────────
 
-WEATHER_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_current_location",
-            "description": "사용자의 현재 위치(도시/지역/국가)와 현지 시각을 반환합니다. '내 위치 어디야', '나 지금 어디 있어', '여기 어디야' 같은 질문, 또는 날씨·시간 등 위치가 필요한데 도시를 모를 때 먼저 호출하세요.",
-            "parameters": {"type": "object", "properties": {}},
-        },
+_LOCATION_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_current_location",
+        "description": (
+            "사용자의 현재 위치(도시/지역/국가)와 현지 시각을 반환합니다. "
+            "'내 위치 어디야', '나 지금 어디 있어', '여기 어디야' 같은 질문에 사용하세요."
+        ),
+        "parameters": {"type": "object", "properties": {}},
     },
+}
+
+_WEATHER_API_TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "get_current_weather",
-            "description": "현재 날씨를 조회합니다. 기온, 습도, 바람, 체감온도, 일출/일몰 등의 정보를 반환합니다. 날씨를 물어보면 이 도구를 사용하세요.",
+            "description": "현재 날씨를 조회합니다.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "city": {
-                        "type": "string",
-                        "description": "도시 이름 (영어 권장: Seoul, Tokyo, New York, London, Incheon)",
-                    },
-                    "units": {
-                        "type": "string",
-                        "description": "온도 단위: metric(섭씨) 또는 imperial(화씨)",
-                        "default": "metric",
-                    },
+                    "city": {"type": "string", "description": "도시 이름 (영어 권장)"},
+                    "units": {"type": "string", "default": "metric"},
                 },
                 "required": ["city"],
             },
@@ -500,25 +545,22 @@ WEATHER_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_weather_forecast",
-            "description": "날씨 예보를 조회합니다. 최대 5일간의 일별 최저/최고 기온과 날씨를 반환합니다.",
+            "description": "날씨 예보를 조회합니다.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "city": {
-                        "type": "string",
-                        "description": "도시 이름 (영어 권장)",
-                    },
-                    "days": {
-                        "type": "integer",
-                        "description": "예보 일수 (1~5, 기본 3)",
-                        "default": 3,
-                    },
+                    "city": {"type": "string", "description": "도시 이름 (영어 권장)"},
+                    "days": {"type": "integer", "default": 3},
                 },
                 "required": ["city"],
             },
         },
     },
 ]
+
+WEATHER_TOOLS = [_LOCATION_TOOL] + (
+    _WEATHER_API_TOOLS if weather_api_enabled() else []
+)
 
 WEATHER_TOOL_MAP = {
     "get_current_weather": get_current_weather,
@@ -527,7 +569,9 @@ WEATHER_TOOL_MAP = {
 }
 
 def execute_weather_tool(tool_name, arguments):
-    """날씨 도구 실행"""
+    """위치·(선택) 날씨 도구 실행"""
+    if tool_name in ("get_current_weather", "get_weather_forecast") and not weather_api_enabled():
+        return {"success": False, "message": "날씨 기능은 사용하지 않습니다."}
     func = WEATHER_TOOL_MAP.get(tool_name)
     if not func:
         return {"success": False, "message": f"알 수 없는 도구: {tool_name}"}

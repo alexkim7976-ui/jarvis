@@ -62,7 +62,7 @@ LOCAL_TOOLS = frozenset({
     "move_files", "open_file", "open_app", "get_disk_usage", "find_large_files",
     "get_system_status", "get_cpu_usage", "get_memory_usage",
     "get_monitor_status", "check_github_now", "check_playstore_now",
-    "get_current_weather", "get_weather_forecast",
+    "get_current_location",
     "get_events", "create_event", "delete_event", "get_upcoming",
     "record_stock_trade", "deposit_portfolio_cash", "report_portfolio_status",
     "get_price_alert_status", "list_price_alerts", "cancel_price_alert",
@@ -115,7 +115,7 @@ _LOCAL_TEXT_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"매매\s*기록|거래\s*기록|record\s*trade", re.I), "trade_record"),
     (re.compile(r"파일\s*(이동|정리)|list\s*folder|organize", re.I), "file_ops"),
     (re.compile(r"시스템\s*상태|cpu|memory", re.I), "system"),
-    (re.compile(r"날씨|weather|일정", re.I), "weather_cal"),
+    (re.compile(r"일정|schedule|calendar", re.I), "calendar"),
     (re.compile(r"알림\s*(목록|취소)|list\s*alert", re.I), "alerts"),
     (re.compile(r"포트폴리오\s*(현황|리포트)", re.I), "portfolio"),
     # 주식 1차 분석 — LOCAL

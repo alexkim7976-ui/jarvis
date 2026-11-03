@@ -88,21 +88,25 @@ JARVIS.app/Contents/
 
 ---
 
-## Apple 공증 (선택, App Store/광역 배포)
+## Apple 서명·공증
 
-Developer ID 인증서가 있으면:
+빌드 스크립트는 `security find-identity -v -p codesigning` 으로 **Developer ID Application** 인증서만 확인합니다. 인증서가 없으면 서명과 공증을 하지 않습니다 (ad-hoc 서명도 하지 않음).
+
+인증서를 받은 뒤:
 
 ```bash
-codesign --force --deep --options runtime \
-  --sign "Developer ID Application: YOUR NAME" \
+security find-identity -v -p codesigning
+
+codesign --force --deep --options runtime --timestamp \
+  --sign "Developer ID Application: YOUR NAME (TEAMID)" \
   dist/JARVIS.app
 
 xcrun notarytool submit dist/JARVIS-3.2.0-mac.dmg \
   --apple-id YOU@email.com --team-id TEAMID --password app-specific-password \
   --wait
-```
 
-현재 스크립트는 **ad-hoc 서명**만 합니다 (같은 Mac·직접 배포용).
+xcrun stapler staple dist/JARVIS-3.2.0-mac.dmg
+```
 
 ---
 

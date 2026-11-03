@@ -76,9 +76,9 @@ class MediaPipelineWorker:
         self._thread = threading.Thread(target=self._loop, name="MediaPipelineWorker", daemon=True)
         self._thread.start()
 
-    def stop(self, *, join_timeout: float = 5.0) -> None:
+    def stop(self, *, join_timeout: float = 0.3) -> None:
         self._running = False
-        if self._thread:
+        if self._thread and self._thread.is_alive():
             self._thread.join(timeout=join_timeout)
             self._thread = None
 

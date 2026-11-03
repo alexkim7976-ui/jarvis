@@ -9,18 +9,36 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
+import importlib.util
 import cv2
 import numpy as np
 
-# face_recognition 라이브러리 (없으면 폴백)
-try:
-    import face_recognition
-    FACE_LIB_AVAILABLE = True
-except ImportError:
-    FACE_LIB_AVAILABLE = False
+# face_recognition 라이브러리 (지연 로드 — 실제 인식/등록 호출 시점에 dlib 로드)
+FACE_LIB_AVAILABLE = importlib.util.find_spec("face_recognition") is not None
 
-FACES_DIR = Path("faces")
-FACES_DIR.mkdir(exist_ok=True)
+class _LazyFaceRecognition:
+    def __init__(self):
+        self._mod = None
+
+    def _load(self):
+        if self._mod is None:
+            import face_recognition as _fr
+            self._mod = _fr
+        return self._mod
+
+    def __getattr__(self, name: str):
+        return getattr(self._load(), name)
+
+face_recognition = _LazyFaceRecognition() if FACE_LIB_AVAILABLE else None
+
+def _faces_dir() -> Path:
+    dd = (os.getenv("JARVIS_DATA_DIR") or "").strip()
+    base = (Path(dd).expanduser() / "faces") if dd else Path("faces")
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+FACES_DIR = _faces_dir()
 # 안전한 저장 포맷 — pickle 역직렬화 RCE 방지 위해 numpy npz 사용 (allow_pickle=False)
 ENCODINGS_FILE = FACES_DIR / "encodings.npz"
 
@@ -76,16 +94,16 @@ class FaceRecognizer:
     def register_face(self, frame, name="Owner"):
         """현재 프레임에서 얼굴을 등록"""
         if not FACE_LIB_AVAILABLE:
-            return {"success": False, "message": "face_recognition 라이브러리가 설치되지 않았습니다."}
+            return {"success": False, "message": "The face_recognition library is not installed."}
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         locations = face_recognition.face_locations(rgb, model="hog")
 
         if not locations:
-            return {"success": False, "message": "화면에서 얼굴을 찾을 수 없습니다. 카메라를 정면으로 바라봐주세요."}
+            return {"success": False, "message": "No face detected in the frame. Please look directly at the camera."}
 
         if len(locations) > 1:
-            return {"success": False, "message": f"화면에 {len(locations)}명이 감지되었습니다. 등록할 사람만 화면에 있어야 합니다."}
+            return {"success": False, "message": f"{len(locations)} faces detected. Only the person being enrolled should be in frame."}
 
         encoding = face_recognition.face_encodings(rgb, locations)[0]
 
@@ -94,11 +112,11 @@ class FaceRecognizer:
             if name in self._known_names:
                 idx = self._known_names.index(name)
                 self._known_encodings[idx] = encoding
-                self._log("OK", f"'{name}' 얼굴 업데이트 완료")
+                self._log("OK", f"'{name}' face updated")
             else:
                 self._known_names.append(name)
                 self._known_encodings.append(encoding)
-                self._log("OK", f"'{name}' 얼굴 등록 완료")
+                self._log("OK", f"'{name}' face enrolled")
 
         # 얼굴 이미지 저장
         top, right, bottom, left = locations[0]
@@ -111,7 +129,7 @@ class FaceRecognizer:
 
         return {
             "success": True,
-            "message": f"'{name}' 얼굴이 성공적으로 등록되었습니다.",
+            "message": f"Face for '{name}' has been enrolled successfully.",
             "registered_count": len(self._known_names),
         }
 
@@ -127,8 +145,8 @@ class FaceRecognizer:
                 img_path = FACES_DIR / f"{name}.jpg"
                 if img_path.exists():
                     img_path.unlink()
-                return {"success": True, "message": f"'{name}' 삭제 완료"}
-            return {"success": False, "message": f"'{name}'이 등록되어 있지 않습니다."}
+                return {"success": True, "message": f"Removed face profile for '{name}'."}
+            return {"success": False, "message": f"'{name}' is not enrolled."}
 
     def list_faces(self):
         """등록된 얼굴 목록"""
@@ -166,12 +184,17 @@ class FaceRecognizer:
                     continue
                 if now - self._warned_unknown > self.UNKNOWN_COOLDOWN:
                     self._warned_unknown = now
+                    try:
+                        from i18n import tr
+                        warn_msg = tr("face_unregistered_warn", user=USER_DISPLAY_NAME)
+                    except Exception:
+                        warn_msg = f"{USER_DISPLAY_NAME}, an unregistered person has been detected. Please be advised."
                     self.events.append({
                         "type": "warn",
                         "name": "Unknown",
-                        "message": f"{USER_DISPLAY_NAME}, 등록되지 않은 인물이 감지되었습니다. 주의가 필요합니다.",
+                        "message": warn_msg,
                     })
-                    self._log("FACE", "⚠ 미등록 인물 감지")
+                    self._log("FACE", "⚠ Unregistered person detected")
                     break
             else:
                 if name in ("Detected", ""):
@@ -180,13 +203,12 @@ class FaceRecognizer:
                 last_greet = self._greeted.get(name, 0)
                 if now - last_greet > self.GREET_COOLDOWN:
                     self._greeted[name] = now
-                    # 현지(IP 기반) 시각으로 아침/낮/저녁/밤 구분 — 시스템 시간이 아닌 사용자 위치 기준
                     try:
                         from weather_module import local_time_greeting, local_offset_cached
                         greet, _, _ = local_time_greeting(local_offset_cached())
                     except Exception:
                         h = datetime.now().hour
-                        greet = "좋은 아침입니다" if h < 12 else ("안녕하세요" if h < 18 else "좋은 저녁입니다")
+                        greet = "Good morning" if h < 12 else ("Good afternoon" if h < 18 else "Good evening")
                     display = USER_DISPLAY_NAME if name in ("Owner", "Boss") else name
                     greeting = f"{greet}, {display}."
                     self.events.append({
@@ -194,7 +216,7 @@ class FaceRecognizer:
                         "name": name,
                         "message": greeting,
                     })
-                    self._log("FACE", f"✓ {name} 인식 → 인사")
+                    self._log("FACE", f"✓ {name} recognized -> greeting")
 
         return results
 

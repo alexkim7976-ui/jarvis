@@ -46,6 +46,7 @@ import secrets
 import threading
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 from typing import Callable, Optional
 
 # ── 외부 통신(푸시)용 — net(재시도/적응형 타임아웃) 우선, 없으면 requests ──
@@ -798,7 +799,13 @@ class JarvisLink:
 
     def _persist_token_securely(self) -> str:
         """자동발급 토큰을 소유자 전용(0600) 파일에 저장. 로그 평문 노출 대체."""
-        path = os.path.abspath(os.getenv("JARVIS_LINK_TOKEN_FILE", ".jarvis_link_token"))
+        raw = os.getenv("JARVIS_LINK_TOKEN_FILE", ".jarvis_link_token").strip()
+        p = Path(raw)
+        if not p.is_absolute():
+            dd = (os.getenv("JARVIS_DATA_DIR") or "").strip()
+            if dd:
+                p = Path(dd).expanduser() / p
+        path = os.path.abspath(str(p))
         try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w") as f:
@@ -811,11 +818,12 @@ class JarvisLink:
             self._log("WARN", f"토큰 파일 저장 실패: {e}")
         return path
 
-    def stop(self):
+    def stop(self, timeout: float = 0.4):
         if self._server:
             self._server.should_exit = True
-        if self._thread:
-            self._thread.join(timeout=5)
+            self._server.force_exit = True
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
 
     # ─────────────────────────────────────────────────────────────
     #  Pub/Sub — 어느 스레드에서도 호출 가능(서버 루프로 안전 위임)

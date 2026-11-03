@@ -674,61 +674,53 @@ def price_confidence(report: ValidationReport) -> dict:
 
 
 def format_briefing(report: ValidationReport) -> str:
-    """2~4문장 음성 브리핑. 사용자 요구 포맷:
-    '[소스들] 등 총 N개 채널의 데이터를 교차 검증한 결과, ...주가는 ...이며...'"""
+    """2~4 sentence spoken English briefing summarizing multi-source cross-validation."""
     nm = report.name or report.query
     cur = report.currency
     ok = report.sources_succeeded
     total = len(report.sources_attempted)
 
-    # 인트로 — 참여 소스 나열 (최대 3개 + "등")
     if not ok:
-        return (f"{nm}에 대한 데이터를 수집하지 못했습니다. "
-                f"{total}개 채널 모두 응답이 없거나 키가 설정되지 않았습니다.")
+        return (f"Unable to collect data for {nm}. "
+                f"None of the {total} channels responded or API keys are not configured.")
     src_head = ", ".join(ok[:3])
-    suffix = " 등" if len(ok) > 3 else ""
+    suffix = " and others" if len(ok) > 3 else ""
     if total > len(ok):
-        intro = (f"{src_head}{suffix} 총 {total}개 채널 중 {len(ok)}개의 데이터를 "
-                 f"교차 검증한 결과,")
+        intro = (f"Cross-validating {len(ok)} of {total} channels including {src_head}{suffix},")
     else:
-        intro = f"{src_head}{suffix} 총 {len(ok)}개 채널의 데이터를 교차 검증한 결과,"
+        intro = f"Cross-validating {len(ok)} channels including {src_head}{suffix},"
 
-    # 가격
     parts = [intro]
     if report.price.final is not None:
-        price_txt = f"현재 {nm}의 주가는 {_fmt_money(report.price.final, cur)}이며"
+        price_txt = f"the consensus price for {nm} is {_fmt_money(report.price.final, cur)}"
         rej_n = len(report.price.rejected)
         if rej_n and report.price.accepted:
             rej_srcs = ", ".join(s for s, _, _ in report.price.rejected)
-            price_txt += f" ({rej_srcs}의 값은 편차가 커 제외)"
-        parts.append(price_txt + ",")
-        # 신뢰도가 낮/보통이면 음성으로도 경고 (높음이면 소스 수가 이미 방증)
+            price_txt += f" (excluding outlier data from {rej_srcs})"
+        parts.append(price_txt + ".")
         _conf = price_confidence(report)
         if _conf["level"] in ("보통", "낮음"):
-            parts.append(f"다만 이 가격은 {_conf['reason']}이라 신뢰도는 {_conf['level']} 수준입니다.")
+            parts.append("Please note that confidence is moderate due to limited source agreement.")
 
-    # 등락
     if report.change_pct.final is not None:
-        sign = "상승" if report.change_pct.final >= 0 else "하락"
-        parts.append(f"전일 대비 {abs(report.change_pct.final):.2f}% {sign}했습니다.")
+        sign = "up" if report.change_pct.final >= 0 else "down"
+        parts.append(f"It is {sign} {abs(report.change_pct.final):.2f}% from the previous close.")
 
-    # 펀더멘털
     fund = []
     if report.per.final:    fund.append(f"PER {report.per.final:.1f}")
     if report.pbr.final:    fund.append(f"PBR {report.pbr.final:.2f}")
     if report.market_cap.final:
-        fund.append(f"시가총액 {_fmt_marketcap(report.market_cap.final, cur)}")
+        fund.append(f"market cap {_fmt_marketcap(report.market_cap.final, cur)}")
     if fund:
-        parts.append("주요 지표는 " + ", ".join(fund) + "입니다.")
+        parts.append("Key metrics are " + ", ".join(fund) + ".")
 
-    # 공시 (DART 전용)
     n_disc = report.extras.get("disclosures_30d")
     if n_disc:
         recent = report.extras.get("recent_disclosures") or []
         if recent:
             parts.append(
-                f"최근 30일간 공시 {n_disc}건 중 최신은 "
-                f"'{recent[0].get('title','제목없음')}'입니다.")
+                f"There are {n_disc} disclosures in the past 30 days, the latest being "
+                f"'{recent[0].get('title','Untitled')}'.")
 
     return " ".join(parts)
 
@@ -1215,10 +1207,10 @@ def _enhance_briefing_with_gemini(compact_digest: str, query: str) -> str:
 
     model_name = os.getenv("GEMINI_FLASH_MODEL", "gemini-3.5-flash")
     prompt = (
-        f"종목: {query}\n"
-        f"교차검증 요약(이 텍스트만 참고, 추가 데이터 요청 금지):\n{compact_digest}\n\n"
-        "위 요약을 바탕으로 사용자에게 읽어줄 한국어 음성 브리핑 2문장 이내로 작성하세요. "
-        "숫자는 요약에 있는 값만 사용하세요."
+        f"Ticker: {query}\n"
+        f"Cross-validation summary (use only this text):\n{compact_digest}\n\n"
+        "Write a concise 2-sentence English voice briefing based on the summary above. "
+        "Use only the numbers provided in the summary."
     )
 
     try:
@@ -1390,7 +1382,7 @@ CROSSVAL_TOOL_NAMES = {t["function"]["name"] for t in CROSSVAL_TOOLS}
 
 
 def _fast_preliminary(query: str) -> dict:
-    """예비 답변 — 단일 실시간 시세(빠름) 또는 신선한 CV 캐시. 실패 시 success=False."""
+    """Preliminary reply — fast single quote or fresh CV cache."""
     # ① 신선한 교차검증 캐시(있으면 즉시)
     try:
         from cv_cache_manager import cv_cache_enabled, get_snapshot, is_snapshot_fresh
@@ -1400,8 +1392,8 @@ def _fast_preliminary(query: str) -> dict:
                 price = snap.get("consensus_price")
                 if price:
                     nm = snap.get("name") or query
-                    b = (f"{nm} 최근 교차검증 합의가는 {price:,.0f} 정도예요. "
-                         f"방금 값으로 다시 교차검증하고 AI로 정밀하게 보고 있어요, 곧 정리해서 알려드릴게요.")
+                    b = (f"The recent cross-validated consensus price for {nm} is around {price:,.0f}. "
+                         f"I am running a fresh multi-source cross-validation and AI analysis now, and will follow up shortly.")
                     return {"success": True, "briefing": b, "price": price,
                             "currency": "", "preliminary": True, "name": nm}
     except Exception:
@@ -1412,7 +1404,7 @@ def _fast_preliminary(query: str) -> dict:
         qd = get_stock_quote(query)
         if qd.get("success"):
             b = (qd.get("briefing", "").strip()
-                 + " 지금 여러 무료 채널로 교차검증하고 AI로 정밀하게 보고 있어요, 곧 정리해서 알려드릴게요.")
+                 + " I am cross-validating across multiple channels and running AI analysis in the background.")
             return {"success": True, "briefing": b.strip(),
                     "price": qd.get("price"), "currency": qd.get("currency", ""),
                     "preliminary": True, "name": qd.get("name") or query}

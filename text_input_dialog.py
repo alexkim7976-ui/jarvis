@@ -28,7 +28,7 @@ def main() -> int:
         return 2
 
     root = tk.Tk()
-    root.title("J.A.R.V.I.S — 명령 입력")
+    root.title("J.A.R.V.I.S — Command Input")
     root.geometry("640x300")
     root.minsize(480, 240)
 
@@ -36,21 +36,23 @@ def main() -> int:
     bar_fg = "#e6f1ff"
     accent = "#1f7aec"
 
-    # ── 상단 안내 바 ──
+    # ── Top instruction bar ──
     header = tk.Frame(root, bg=bar_bg)
     header.pack(fill="x")
     tk.Label(
         header,
-        text="J.A.R.V.I.S에게 보낼 명령을 입력하고 Enter (여러 번 가능)",
+        text="Type a command for J.A.R.V.I.S and press Enter (multiple commands supported)",
         bg=bar_bg, fg=bar_fg, anchor="w", font=("AppleSDGothicNeo", 13),
     ).pack(fill="x", padx=16, pady=10)
 
-    # ── 입력 영역: 큰 흰색 박스 + 검은 글자/커서 (타이핑이 항상 보임) ──
+    # ── Input box ──
+    from login_glass_style import focus_tk_window, tk_korean_font
+
     text = tk.Text(
         root, height=5, wrap="word",
-        font=("AppleSDGothicNeo", 20),
+        font=tk_korean_font(20),
         background="white", foreground="black",
-        insertbackground="black",   # 커서(캐럿)도 검정 → 위치가 보임
+        insertbackground="black",
         insertwidth=3,
         relief="flat", highlightthickness=2,
         highlightbackground="#c8d2dc", highlightcolor=accent,
@@ -58,7 +60,7 @@ def main() -> int:
     )
     text.pack(fill="both", expand=True, padx=16, pady=(12, 6))
 
-    status = tk.Label(root, text="입력 대기 중…", bg=bar_bg, fg="#7f93a6",
+    status = tk.Label(root, text="Waiting for input…", bg=bar_bg, fg="#7f93a6",
                       anchor="w", font=("AppleSDGothicNeo", 11))
     status.pack(fill="x")
 
@@ -66,7 +68,6 @@ def main() -> int:
         content = text.get("1.0", "end").strip()
         if not content:
             return "break"
-        # 명령은 한 줄로 정규화 (개행/연속 공백 → 단일 공백)
         line = " ".join(content.split())
         try:
             sys.stdout.write(line + "\n")
@@ -76,23 +77,22 @@ def main() -> int:
             return "break"
         text.delete("1.0", "end")
         preview = line if len(line) <= 50 else line[:50] + "…"
-        status.config(text=f"✓ 전송됨: {preview}", fg=accent)
-        return "break"   # Enter 기본 줄바꿈 억제 → 전송만
+        status.config(text=f"✓ Sent: {preview}", fg=accent)
+        return "break"
 
     def close(_event=None):
         root.destroy()
 
-    # Enter=전송, Shift+Enter=줄바꿈
     text.bind("<Return>", send)
     text.bind("<Shift-Return>", lambda e: None)
     root.bind("<Escape>", close)
 
     btns = tk.Frame(root, bg=bar_bg)
     btns.pack(fill="x")
-    tk.Button(btns, text="전송", command=send, default="active",
+    tk.Button(btns, text="Send", command=send, default="active",
               highlightbackground=bar_bg, font=("AppleSDGothicNeo", 13, "bold"),
               padx=18, pady=4).pack(side="right", padx=(0, 16), pady=12)
-    tk.Button(btns, text="닫기", command=close,
+    tk.Button(btns, text="Close", command=close,
               highlightbackground=bar_bg, font=("AppleSDGothicNeo", 13),
               padx=14, pady=4).pack(side="right", padx=(0, 8), pady=12)
 
@@ -100,16 +100,9 @@ def main() -> int:
 
     # macOS: 창을 확실히 앞으로 + 입력 박스에 키보드 포커스. 생성 직후/지연 둘 다 시도.
     def _focus():
-        try:
-            root.lift()
-            root.attributes("-topmost", True)
-            root.after(500, lambda: root.attributes("-topmost", False))
-            root.focus_force()
-            text.focus_set()
-        except Exception:
-            pass
+        focus_tk_window(root, text, topmost_ms=500)
+
     _focus()
-    root.after(200, _focus)
 
     root.mainloop()
     return 0

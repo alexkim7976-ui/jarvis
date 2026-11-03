@@ -9,7 +9,7 @@ from __future__ import annotations
 import cv2
 
 from hangul_input import HangulComposer
-from korean_font import put_text
+from korean_font import put_text, blend_rect
 
 _PANEL = (15, 12, 8)
 _CYAN = (255, 220, 0)
@@ -20,7 +20,7 @@ _GREEN = (80, 255, 120)
 class ScreenKeyboard:
     def __init__(self) -> None:
         self.active = False
-        self.hangul = True
+        self.hangul = False
         self._composer = HangulComposer()
 
     def open(self) -> None:
@@ -66,29 +66,29 @@ class ScreenKeyboard:
         return None
 
     def draw(self, frame):
-        """입력 중이 아니면 짧은 안내, 입력 중이면 명령 줄을 화면 하단에 그린다."""
+        """Draw bottom input hint when idle, or command input bar when active."""
+        from i18n import get_lang_meta, tr
         h, w = frame.shape[:2]
         if self.active:
             top = h - 112
-            ov = frame.copy()
-            cv2.rectangle(ov, (0, top), (w, h - 62), _PANEL, -1)
-            cv2.addWeighted(ov, 0.82, frame, 0.18, 0, frame)
+            blend_rect(frame, 0, top, w, h - 62, _PANEL, 0.82)
             cv2.rectangle(frame, (8, top + 4), (w - 8, h - 66), _CYAN, 1, cv2.LINE_AA)
-            mode = "한글" if self.hangul else "영문"
+            mode = "KO" if self.hangul else "EN"
             put_text(frame, f"⌨ {mode}", (16, top + 30), size=16, color=_CYAN, bold=True)
             shown = self.buffer()
             if len(shown) > 32:
                 shown = "…" + shown[-32:]
             color = _GREEN if self.buffer() else _DIM
-            put_text(frame, (shown or "명령을 입력하세요") + "_", (100, top + 30), size=18, color=color)
+            put_text(frame, (shown or tr("kb_placeholder")) + "_", (100, top + 30), size=18, color=color)
             put_text(
-                frame, "입력기 영어 · Tab 한/영 · Enter 전송 · Esc 취소",
+                frame, tr("kb_active_hint"),
                 (16, top + 48), size=13, color=_DIM,
             )
             return frame
 
+        lang_lbl = get_lang_meta()["label"]
         put_text(
-            frame, "Enter 키보드 명령  ·  검지 유지=말하기  ·  브이 유지=전송",
+            frame, tr("kb_idle_hint", lang=lang_lbl),
             (16, h - 78), size=13, color=_DIM,
         )
         return frame

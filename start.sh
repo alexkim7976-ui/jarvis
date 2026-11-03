@@ -32,7 +32,26 @@ fi
 # shellcheck disable=SC1091
 source ".venv/bin/activate"
 
-# AI 스택 자동 검증 (Ollama·모델·무료 모드)
-python verify_ai_stack.py
+# Fast boot defaults (override with JARVIS_QUICK_START=0 ./start.sh for full verification)
+export JARVIS_FAST_BOOT="${JARVIS_FAST_BOOT:-1}"
+export JARVIS_SKIP_BOOT_AUDIT="${JARVIS_SKIP_BOOT_AUDIT:-1}"
+export JARVIS_SKIP_OPENCLAW_BOOT="${JARVIS_SKIP_OPENCLAW_BOOT:-1}"
+export JARVIS_SKIP_WARMUP="${JARVIS_SKIP_WARMUP:-1}"
+export JARVIS_SKIP_AI_VERIFY="${JARVIS_SKIP_AI_VERIFY:-1}"
 
-exec python jarvis_v2.py
+if [[ "${JARVIS_QUICK_START:-1}" == "1" ]]; then
+  export JARVIS_QUICK_START=1
+  if [[ "${JARVIS_SKIP_AI_VERIFY}" != "1" ]]; then
+    python verify_ai_stack.py --quick
+  fi
+else
+  python verify_ai_stack.py
+fi
+
+echo ""
+echo "▶ Starting J.A.R.V.I.S..."
+echo "  · The 'J.A.R.V.I.S — Sign In' window will open shortly (use ⌘+Tab if hidden)."
+echo "  · After signing in, the webcam HUD window will appear."
+echo ""
+
+exec python -u jarvis_v2.py

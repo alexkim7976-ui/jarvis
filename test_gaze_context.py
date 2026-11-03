@@ -100,4 +100,5 @@ check("_is_deictic('AAPL') False", _is_deictic("AAPL") is False)
 g.clear_focus()
 
 print(f"\n결과: {PASS} passed, {FAIL} failed")
-sys.exit(1 if FAIL else 0)
+if __name__ == "__main__":
+    sys.exit(1 if FAIL else 0)

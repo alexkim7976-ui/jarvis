@@ -281,41 +281,47 @@ def start_backend() -> bool:
     return False
 
 
-def stop_backend():
-    """JARVIS가 기동한 백엔드만 종료."""
+def stop_backend(timeout: float = 1.2):
+    """JARVIS가 기동한 백엔드만 빠르게 종료 (UI 프리징 방지를 위해 짧은 대기 후 SIGKILL)."""
     global _process, _started_by_jarvis, _log_file
 
     if not _started_by_jarvis or _process is None:
         return
 
-    if _process.poll() is not None:
-        _process = None
-        _started_by_jarvis = False
-        return
+    proc = _process
+    _process = None
+    _started_by_jarvis = False
 
-    _log("INFO", "Supply Chain Agent 종료 중…")
-    try:
-        os.killpg(os.getpgid(_process.pid), signal.SIGTERM)
-        _process.wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(os.getpgid(_process.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    except ProcessLookupError:
-        pass
-    except Exception as e:
-        _log("WARN", f"종료 중 오류: {e}")
-    finally:
-        _process = None
-        _started_by_jarvis = False
+    if proc.poll() is not None:
         if _log_file:
             try:
                 _log_file.close()
             except Exception:
                 pass
             _log_file = None
-        _log("OK", "Supply Chain Agent 종료")
+        return
+
+    _log("INFO", "Stopping Supply Chain Agent…")
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        proc.wait(timeout=max(0.2, float(timeout)))
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    except ProcessLookupError:
+        pass
+    except Exception as e:
+        _log("WARN", f"Shutdown error: {e}")
+    finally:
+        if _log_file:
+            try:
+                _log_file.close()
+            except Exception:
+                pass
+            _log_file = None
+        _log("OK", "Supply Chain Agent stopped")
 
 
 def ensure_running() -> bool:

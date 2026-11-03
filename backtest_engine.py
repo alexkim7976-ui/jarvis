@@ -24,25 +24,32 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 import numpy as np
-import pandas as pd
 
-# matplotlib — GUI 없는 Agg 백엔드 (메인 OpenCV/제스처 루프와 충돌 방지)
-# 캐시 디렉터리를 워크스페이스 내부로 고정해 권한/속도 경고 방지
+# matplotlib — GUI 없는 Agg 백엔드 (실제 차트 생성 시점에 지연 로드)
 os.environ.setdefault("MPLCONFIGDIR",
                       str(Path(os.getenv("AUDIO_SAVE_DIR", "audio_cache")) / ".mplcache"))
 Path(os.environ["MPLCONFIGDIR"]).mkdir(parents=True, exist_ok=True)
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
-try:
-    import yfinance as yf
-    YF_AVAILABLE = True
-except ImportError:
-    YF_AVAILABLE = False
+class _LazyPyplot:
+    def __init__(self):
+        self._plt = None
 
-# stock_quant 의 지표 계산 함수 + 티커 변환 재사용
+    def _load(self):
+        if self._plt is None:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as _p
+            self._plt = _p
+        return self._plt
+
+    def __getattr__(self, name: str):
+        return getattr(self._load(), name)
+
+plt = _LazyPyplot()
+
+# stock_quant 의 지표 계산 함수 + 티커 변환 + 지연 로드된 pd/yf 재사용
 from stock_quant import (
+    YF_AVAILABLE, yf, pd,
     _resolve_ticker,
     calc_rsi, calc_macd, calc_stochastic, calc_bollinger, calc_ichimoku,
     calc_adx, calc_parabolic_sar, calc_momentum, calc_williams_r,

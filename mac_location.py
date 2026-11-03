@@ -7,6 +7,7 @@ CoreLocation은 WiFi/블루투스/GPS 기반이라 시/구/동 단위로 정확�
 권한 거부/미지원 시 None 반환 → 호출부가 IP 폴백.
 별도 pip 의존성 없이 objc.loadBundle로 CoreLocation.framework를 동적 로드한다.
 """
+import os
 import time
 
 try:
@@ -61,9 +62,18 @@ if _OBJC_OK:
             self.failed = True
 
 
-def get_device_coordinates(timeout=8.0):
+def _default_location_timeout() -> float:
+    try:
+        return float(os.getenv("JARVIS_LOCATION_TIMEOUT", "8"))
+    except (TypeError, ValueError):
+        return 8.0
+
+
+def get_device_coordinates(timeout=None):
     """기기 실제 위치 (lat, lon, accuracy_m) 반환. 실패/권한없음 시 None.
     메인 스레드에서 호출하는 것이 가장 안정적(CoreLocation은 run loop 기반)."""
+    if timeout is None:
+        timeout = _default_location_timeout()
     if not _load_corelocation():
         return None
     try:

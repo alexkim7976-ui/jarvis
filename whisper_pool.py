@@ -56,13 +56,14 @@ def _backend() -> str:
             return "faster"
     except ImportError:
         pass
-    b = os.getenv("JARVIS_WHISPER_BACKEND", "auto").strip().lower()
-    if b in ("faster", "ctranslate2", "ct2"):
+    b = os.getenv("JARVIS_WHISPER_BACKEND", "faster").strip().lower()
+    if b in ("faster", "ctranslate2", "ct2", "auto"):
+        # faster-whisper(CTranslate2 ARM NEON int8)는 FFmpeg 서브프로세스 없이 메모리 배열을
+        # 100~190ms 만에 즉시 추론하며 HuggingFace 네트워크 지연을 유발하지 않는다.
         return "faster"
     if b == "mlx":
         return "mlx"
-    # auto: Apple Silicon → MLX(Metal/GPU·ANE). 그 외 → faster-whisper(CPU int8).
-    return "mlx" if is_apple_silicon() else "faster"
+    return "faster"
 
 
 def _resolve_size(role: str, override: str | None) -> str:
@@ -71,8 +72,8 @@ def _resolve_size(role: str, override: str | None) -> str:
     if _low_mem():
         return "tiny"
     if role == "wake":
-        return os.getenv("JARVIS_WAKE_WHISPER_MODEL") or os.getenv("JARVIS_WHISPER_MODEL", "tiny")
-    return os.getenv("JARVIS_WHISPER_MODEL", "small")
+        return os.getenv("JARVIS_WAKE_WHISPER_MODEL") or os.getenv("JARVIS_WHISPER_MODEL", "base")
+    return os.getenv("JARVIS_WHISPER_MODEL", "base")
 
 
 # ── MLX(Apple Metal) 어댑터 — faster-whisper와 동일한 .transcribe() 인터페이스 제공 ──
@@ -93,6 +94,7 @@ class _MLXWhisperAdapter:
 
     def transcribe(self, audio, language=None, **_ignored):
         try:
+            # audio가 이미 numpy float32 배열로 전달되면 ffmpeg 서브프로세스 없이 즉시 추론
             res = self._mlx.transcribe(audio, path_or_hf_repo=self._repo, language=language)
         except Exception as e:
             err = str(e).lower()

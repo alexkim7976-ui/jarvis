@@ -1,58 +1,57 @@
 """
-J.A.R.V.I.S — 음성 출력 말투 (부드럽고 자연스러운 한국어 존댓말/해요체)
+J.A.R.V.I.S — Voice Output Style (Multi-Language: EN / 中文 / 한국어 / 日本語 / Español)
 """
 from __future__ import annotations
 
 import os
 import re
 
-USER_DISPLAY_NAME = (os.getenv("JARVIS_USER_NAME") or "사용자").strip() or "사용자"
-
-USER_NAME_RULES = f"""
-- 사용자 이름: {USER_DISPLAY_NAME}. 부를 때는 반드시 "{USER_DISPLAY_NAME}"만 사용.
-- 별명, 성만 단독으로 부르는 호칭, "토니", "Tony", "선생님"은 쓰지 말 것.
-"""
-
-VOICE_STYLE_INSTRUCTIONS = f"""
-한국어 음성 출력 규칙 (한국어로 답할 때 반드시 지킬 것):
-- 항상 **존댓말**. 단 딱딱한 보고서체(~습니다/~입니다 나열)가 아니라, 옆에서 편하게
-  말해주듯 **부드럽고 다정한 해요체**로.
-- 종결: ~예요/~이에요/~해요/~네요/~죠/~거예요/~더라고요/~을게요/~보세요/~좋아요
-  (자연스럽게 섞어서). 반말(~야/~어/~지/~해/~할게/~봐) 절대 금지.
-- 격식체(~하겠습니다/~드리겠습니다/~바랍니다) 나열도 지양 — 따뜻하고 자연스럽게.
-- 어순도 한국어답게: "지금 주가가 좀 올랐어요", "일단 이 정도면 괜찮아 보여요",
-  "근데 변동성은 조금 큰 편이에요."
-- 접속: 근데, 그래서, 일단, 솔직히, 아마, 오히려 — 필요할 때만 가볍게.
-- 문장 2~4개, 짧게 끊어서. 숫자는 구어체 (7만 2천 원, 3퍼센트 정도).
-- 호칭은 "{USER_DISPLAY_NAME}"만 (0~1회). "선생님", "토니", "Tony" 금지.
-- 번호 목록·불릿·JSON·함수명·영문 기술 용어는 말하지 말 것.
-- "처리 완료", "브리핑", "분석 결과는 다음과 같습니다" 같은 딱딱한 표현 금지.
-- 영어 문장 구조를 한국어로 옮긴 느낌 금지 (예: "현재 주가는 ~입니다" → "지금 주가는 ~ 정도예요").
-- 영어로 답할 때만 영어 말투 사용. 한국어 질문/대화면 한국어 해요체만.
-"""
-
-ACK_PHRASES = (
-    "네, 잠시만요.",
-    "네, 바로 볼게요.",
-    "네, 그거 확인해 볼게요.",
-    "잠시만요, 찾아볼게요.",
+from i18n import (
+    LANGUAGE_META,
+    build_language_directive,
+    get_ack_phrases,
+    get_lang,
+    get_lang_meta,
 )
 
+
+def _compute_display_name() -> str:
+    meta = get_lang_meta()
+    raw = (os.getenv("JARVIS_USER_NAME") or "").strip()
+    default_titles = {m["default_honorific"] for m in LANGUAGE_META.values()} | {"사용자", "User", ""}
+    if not raw or raw in default_titles:
+        return str(meta["default_honorific"])
+    return raw
+
+
+USER_DISPLAY_NAME = _compute_display_name()
+USER_NAME_RULES = f"- User's preferred form of address: {USER_DISPLAY_NAME}.\n"
+VOICE_STYLE_INSTRUCTIONS = build_language_directive()
+ACK_PHRASES = get_ack_phrases()
+
+
+def refresh_language_style() -> None:
+    """Recompute module-level language style constants after set_lang()."""
+    global USER_DISPLAY_NAME, USER_NAME_RULES, VOICE_STYLE_INSTRUCTIONS, ACK_PHRASES
+    USER_DISPLAY_NAME = _compute_display_name()
+    USER_NAME_RULES = f"- User's preferred form of address: {USER_DISPLAY_NAME}.\n"
+    VOICE_STYLE_INSTRUCTIONS = build_language_directive(user_name=USER_DISPLAY_NAME)
+    ACK_PHRASES = get_ack_phrases()
+
 _STIFF_REPLACEMENTS = (
-    (r"verify_stock_indicators[^\s,.]*", "지표"),
+    (r"verify_stock_indicators[^\s,.]*", "indicators"),
     (r"overlay_table[^\s,.]*", ""),
-    (r"J\.A\.R\.V\.I\.S\.?", "자비스"),
+    (r"J\.A\.R\.V\.I\.S\.?", "JARVIS"),
     (r"로컬 정밀 분석입니다\.?", ""),
     (r"처리 완료[,.]?\s*", ""),
     (r"브리핑[드]?(?:합니다|드리겠습니다)?[,.]?\s*", ""),
     (r"분석 결과(?:는|가)\s*(?:다음과 같습니다|다음과\s*같습니다)[,.]?\s*", ""),
-    (r"발생했습니다", "생겼어요"),
-    (r"제한됩니다", "제한돼요"),
-    (r"접근하시기 바랍니다", "조심하시는 게 좋아요"),
-    (r"바로 수행하겠습니다\.?", "바로 할게요."),
-    (r"수행하(?:겠|드리)(?:습니다|게요)[,.]?\s*", "할게요. "),
-    (r"명령 확인했습니다\.?", "네, 알겠어요."),
-    (r"현재\s+", "지금 "),
+    (r"발생했습니다", "occurred"),
+    (r"제한됩니다", "is restricted"),
+    (r"접근하시기 바랍니다", "please proceed with caution"),
+    (r"바로 수행하겠습니다\.?", "Right away."),
+    (r"수행하(?:겠|드리)(?:습니다|게요)[,.]?\s*", "I will handle that. "),
+    (r"명령 확인했습니다\.?", "Understood."),
 )
 
 # 한국어 문장 끝 → 부드러운 존댓말(해요체). 종결 문장부호(.?!…)와 무관하게 매칭한다.
@@ -170,7 +169,7 @@ def normalize_user_address(text: str) -> str:
     """토니·선생님 같은 잘못된 호칭 → 로그인한 이름."""
     if not text or not str(text).strip():
         return text or ""
-    name = USER_DISPLAY_NAME
+    name = _compute_display_name()
     t = str(text)
     t = re.sub(r"토니(?=[,，.\s]|$)", name, t)
     t = re.sub(r"Tony(?=[,，.\s]|$)", name, t, flags=re.I)
@@ -182,7 +181,7 @@ def normalize_user_address(text: str) -> str:
 def with_user_address(msg: str, *, comma: bool = True) -> str:
     """메시지 앞에 사용자 이름을 붙인다 (이미 있으면 정규화만)."""
     msg = (msg or "").strip()
-    name = USER_DISPLAY_NAME
+    name = _compute_display_name()
     if msg.startswith(name):
         return normalize_user_address(msg)
     sep = ", " if comma else " "

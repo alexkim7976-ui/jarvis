@@ -10,9 +10,9 @@ from voice_profile import VoiceProfile
 WAKE_WORD_ENABLED  = os.getenv("WAKE_WORD_ENABLED","true").lower()=="true"
 WAKE_WORDS_STR     = os.getenv(
     "WAKE_WORDS",
-    "자비스야,자비스,jarvis,hey jarvis,쟈비스,자바스,저비스",
+    "jarvis,hey jarvis,자비스야,자비스,쟈비스,자바스,저비스,贾维斯,你好贾维斯,ジャービス,ねえジャービス,oye jarvis",
 )
-WAKE_WORDS         = [w.strip().lower() for w in WAKE_WORDS_STR.split(",")]
+WAKE_WORDS         = [w.strip().lower() for w in WAKE_WORDS_STR.split(",") if w.strip()]
 WAKE_THRESHOLD     = int(os.getenv("WAKE_WORD_THRESHOLD","600"))
 WAKE_COOLDOWN      = float(os.getenv("WAKE_WORD_COOLDOWN","3.0"))
 WAKE_CLIP_DURATION = 1.2    # 클립 최대 길이(초) — 보통 침묵 감지로 더 일찍 종료됨
@@ -22,7 +22,7 @@ SAMPLE_RATE=16_000; CHANNELS=1; CHUNK=1_024; FORMAT=pyaudio.paInt16
 def _log(level, msg):
     ts=datetime.now().strftime("%H:%M:%S")
     icons={"INFO":"◈","OK":"✓","WARN":"⚠","WAKE":"🔔","AUTH":"🔒","DENY":"🚫"}
-    print(f"[{ts}] {icons.get(level,'·')} [웨이크] {msg}")
+    print(f"[{ts}] {icons.get(level,'·')} [Wake] {msg}")
 
 class WakeWordDetector:
     def __init__(self, openai_client):
@@ -63,30 +63,38 @@ class WakeWordDetector:
         if self.voice_profile.trained:
             try:
                 from voice_profile import is_known_device
-                _tag = " (등록 기기)" if is_known_device() else ""
+                _tag = " (enrolled device)" if is_known_device() else ""
             except ImportError:
                 _tag = ""
-            _log("AUTH", f"음성 인증 활성 — 등록된 주인만 웨이크 가능 "
-                         f"({self.voice_profile._sample_count}샘플){_tag}")
+            _log("AUTH", f"Voice auth active — only enrolled owner can wake "
+                         f"({self.voice_profile._sample_count} samples){_tag}")
         else:
             try:
                 from voice_profile import is_known_device, voice_setup_required
                 if is_known_device() and not voice_setup_required(self.voice_profile):
-                    _log("AUTH", f"등록 기기 — 저장 프로필 적용 ({self.voice_profile._sample_count}샘플)")
+                    _log("AUTH", f"Enrolled device — loaded saved profile ({self.voice_profile._sample_count} samples)")
                 else:
-                    _log("WARN", "음성 프로필 미학습 — 누구나 웨이크 가능 (V키로 학습)")
+                    _log("WARN", "Voice profile untrained — anyone can wake (press V to train)")
             except ImportError:
-                _log("WARN", "음성 프로필 미학습 — 누구나 웨이크 가능 (V키로 학습)")
+                _log("WARN", "Voice profile untrained — anyone can wake (press V to train)")
 
-    def stop(self):
+    def stop(self, timeout: float = 0.4):
         self._running=False; self.listening=False; self.status="OFF"
-        if self._thread: self._thread.join(timeout=3)
-        self._release_stream()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+        self._release_stream(timeout=0.2)
 
-    def _release_stream(self):
+    def _release_stream(self, timeout: float | None = None):
         """CoreAudio 입력 장치 점유 해제 — 녹음/TTS와 동시 오픈 시 macOS UI 프리징 방지.
         _stream_lock으로 in-flight read()가 끝날 때까지 대기 후 close → ring buffer use-after-free(SIGSEGV) 방지."""
-        with self._stream_lock:
+        acquired = (
+            self._stream_lock.acquire(timeout=timeout)
+            if timeout is not None
+            else self._stream_lock.acquire()
+        )
+        if not acquired:
+            return
+        try:
             if self._stream:
                 try:
                     self._stream.stop_stream()
@@ -94,6 +102,8 @@ class WakeWordDetector:
                 except Exception:
                     pass
                 self._stream = None
+        finally:
+            self._stream_lock.release()
 
     def pause(self):
         self.listening = False
@@ -193,6 +203,15 @@ class WakeWordDetector:
     def _process_wake_clip(self, frames):
         """Whisper STT + 음성 프로필 검증 — 웨이크 listen 루프와 분리."""
         try:
+            try:
+                from power_save_mode import is_active
+                if is_active():
+                    self.status = "LISTENING"
+                    return
+            except ImportError:
+                if os.getenv("JARVIS_POWER_SAVE", "").strip().lower() in ("1", "true", "yes", "on"):
+                    self.status = "LISTENING"
+                    return
             audio_data = b"".join(frames)
             vp_match, vp_conf = False, 0.0
             if self.voice_profile.trained:
@@ -293,11 +312,13 @@ class WakeWordDetector:
         except ImportError:
             pass
         # 폴백: 기존 인라인 로직
+        _lang = (os.getenv("JARVIS_STT_LANG") or os.getenv("JARVIS_LANG") or "en").strip().lower()
+        _lang = "ko" if _lang.startswith("ko") else "en"
         model=self._ensure_model()
         if model is not None:
             try:
                 from wake_engine import matches_wake_word
-                segments,_=model.transcribe(wav_path, language="ko",
+                segments,_=model.transcribe(wav_path, language=_lang,
                     beam_size=1, condition_on_previous_text=False)
                 text=" ".join(seg.text.strip() for seg in segments).strip().lower()
                 self.last_heard=text
@@ -306,19 +327,19 @@ class WakeWordDetector:
                     return True, True, "whisper"
                 return False, True, ""
             except Exception as e:
-                _log("WARN", f"로컬 Whisper 실패: {e}")
+                _log("WARN", f"Local Whisper failed: {e}")
         try:
             from wake_engine import matches_wake_word
             with open(wav_path,"rb") as f:
                 r=self._client.audio.transcriptions.create(
-                    model="whisper-1",file=f,response_format="text",language="ko")
+                    model="whisper-1",file=f,response_format="text",language=_lang)
             text=r.strip().lower(); self.last_heard=text
             if not text: return False, True, ""
             if matches_wake_word(text, WAKE_WORDS):
                 return True, True, "whisper"
             return False, True, ""
         except Exception as e:
-            _log("WARN",f"Whisper API 실패: {e}"); return False, False, ""
+            _log("WARN",f"Whisper API failed: {e}"); return False, False, ""
 
     def _save_temp_wav(self, frames):
         if not frames: return None

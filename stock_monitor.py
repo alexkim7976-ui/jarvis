@@ -35,17 +35,22 @@ from pathlib import Path
 from typing import Optional
 
 try:
-    import yfinance as yf
-    YF_AVAILABLE = True
+    from stock_quant import YF_AVAILABLE, yf
 except ImportError:
-    YF_AVAILABLE = False
+    try:
+        import yfinance as yf
+        YF_AVAILABLE = True
+    except ImportError:
+        YF_AVAILABLE = False
+        yf = None
 
 from stock_quant import _resolve_ticker
 
 # ──────────────────────────────────────────────
 #  설정
 # ──────────────────────────────────────────────
-RULES_FILE    = Path("stock_monitor_rules.json")
+_DATA_DIR_SM = (os.getenv("JARVIS_DATA_DIR") or "").strip()
+RULES_FILE    = (Path(_DATA_DIR_SM).expanduser() / "stock_monitor_rules.json") if _DATA_DIR_SM else Path("stock_monitor_rules.json")
 CHECK_INTERVAL = int(os.getenv("STOCK_MONITOR_INTERVAL", "30"))   # 초 (기본 30초)
 DEFAULT_COOLDOWN = int(os.getenv("STOCK_MONITOR_COOLDOWN", "3600")) # 초 (기본 1시간)
 RESET_BUFFER_PCT = 0.5   # 조건 해소 판정 완충 (%)
@@ -207,10 +212,10 @@ class StockMonitor:
         self._thread.start()
         _log("OK", f"감시 시작 — 간격={self.interval}초 | 규칙={len(self._rules)}개")
 
-    def stop(self):
+    def stop(self, timeout: float = 0.25):
         self._running = False
-        if self._thread:
-            self._thread.join(timeout=5)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
 
     # ── 이벤트 큐 인터페이스 (price_alert 호환) ──
     def get_events(self) -> list[dict]:

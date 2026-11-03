@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # JARVIS.app — macOS 더블클릭 → jarvis_v2.py
 # 사용:
-#   ./scripts/build_jarvis_app.sh              # 프로젝트 내 JARVIS.app 빌드
-#   ./scripts/build_jarvis_app.sh --all        # 바탕화면 + ~/Applications 설치
+#   ./scripts/build_jarvis_app.sh --project-only     # 개발: project_root → 소스 트리
+#   ./scripts/build_jarvis_app.sh --release --all    # 출시: Resources/app 번들 + 설치
+#   ./scripts/build_jarvis_app.sh --all              # 개발 빌드 + 바탕화면/Applications
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -14,7 +15,19 @@ RESOURCES="$CONTENTS/Resources"
 VERSION="3.2.0"
 BUNDLE_ID="com.jarvis.assistant"
 
-echo "▶ JARVIS Mac 앱 빌드"
+RELEASE=0
+INSTALL_MODE="--project-only"
+for arg in "$@"; do
+  case "$arg" in
+    --release) RELEASE=1 ;;
+    --all) INSTALL_MODE="--all" ;;
+    --desktop) INSTALL_MODE="--desktop" ;;
+    --applications) INSTALL_MODE="--applications" ;;
+    --project-only) INSTALL_MODE="--project-only" ;;
+  esac
+done
+
+echo "▶ JARVIS Mac 앱 빌드 (release=$RELEASE)"
 echo "   프로젝트: $ROOT"
 
 if [[ -f "$ROOT/scripts/generate_jarvis_icon.py" ]]; then
@@ -24,9 +37,66 @@ fi
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS" "$RESOURCES"
 
-# 앱이 어디에 복사돼도 jarvis_v2.py 경로 유지
-printf '%s' "$ROOT" > "$RESOURCES/project_root"
-chmod 644 "$RESOURCES/project_root"
+bundle_release_app() {
+  local dest="$RESOURCES/app"
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  echo "▶ Resources/app 에 출시 코드 복사…"
+  rsync -a --delete \
+    --include '.env.example' \
+    --include 'scripts/release.env.example' \
+    --exclude '.git/' \
+    --exclude '.venv/' \
+    --exclude '.venv-*/' \
+    --exclude 'venv/' \
+    --exclude '__pycache__/' \
+    --exclude '*.pyc' \
+    --exclude '.env' \
+    --exclude '.env.*' \
+    --exclude 'audio_cache/' \
+    --exclude '.logs/' \
+    --exclude '.credentials/' \
+    --exclude '.certs/' \
+    --exclude '.cache/' \
+    --exclude 'JARVIS.app/' \
+    --exclude 'dist/' \
+    --exclude 'target/' \
+    --exclude '.idea/' \
+    --exclude '.claude/' \
+    --exclude '.DS_Store' \
+    --exclude 'faces/' \
+    --exclude 'voice_profile/' \
+    --exclude 'hud_dump/' \
+    --exclude 'portfolio.json' \
+    --exclude 'stock_monitor_rules.json' \
+    --exclude '.jarvis_link_token' \
+    --exclude '.jarvis_path' \
+    --exclude 'data/accounts.json' \
+    --exclude 'data/interests.json' \
+    --exclude 'data/interest_cache.json' \
+    --exclude 'data/jarvis_memory.db' \
+    --exclude 'data/campus_schedule.json' \
+    --exclude 'data/sandbox/' \
+    "$ROOT/" "$dest/"
+  # release template 은 반드시 포함
+  mkdir -p "$dest/scripts"
+  cp "$ROOT/scripts/release.env.example" "$dest/scripts/release.env.example"
+  cp "$ROOT/scripts/ollama_setup.py" "$dest/scripts/ollama_setup.py"
+  cp "$ROOT/scripts/app_setup_wizard.py" "$RESOURCES/app_setup_wizard.py"
+  cp "$ROOT/scripts/release.env.example" "$RESOURCES/release.env.example"
+  touch "$RESOURCES/release_mode"
+  rm -f "$RESOURCES/project_root"
+  echo "✓ release_mode + Resources/app ($(du -sh "$dest" | awk '{print $1}'))"
+}
+
+if [[ "$RELEASE" == "1" ]]; then
+  bundle_release_app
+else
+  # 개발: 앱이 어디에 복사돼도 jarvis_v2.py 경로 유지
+  printf '%s' "$ROOT" > "$RESOURCES/project_root"
+  chmod 644 "$RESOURCES/project_root"
+  rm -f "$RESOURCES/release_mode"
+fi
 
 # 런처 스크립트를 앱 번들에 내장 (프로젝트 scripts 경로에 의존하지 않음)
 cp "$ROOT/scripts/jarvis_launcher.sh" "$RESOURCES/jarvis_launcher.sh"
@@ -92,15 +162,13 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <key>NSCameraUsageDescription</key>
   <string>JARVIS HUD와 차트 분석을 위해 웹캠이 필요합니다.</string>
   <key>NSLocationUsageDescription</key>
-  <string>JARVIS가 현재 위치(도시·지역)와 현지 시각·날씨를 안내하려면 위치 접근이 필요합니다.</string>
+  <string>JARVIS가 현재 위치(도시·지역)와 현지 시각을 안내하려면 위치 접근이 필요합니다.</string>
   <key>NSLocationWhenInUseUsageDescription</key>
   <string>JARVIS가 "내 위치 어디야" 등 위치 기반 안내를 하려면 사용 중 위치 접근이 필요합니다.</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>실행 중 JARVIS 창을 앞으로 가져오기 위해 자동화 권한이 필요합니다.</string>
   <key>LSEnvironment</key>
   <dict>
-    <key>MPLCONFIGDIR</key>
-    <string>REPLACE_MPLCONFIGDIR</string>
     <key>JARVIS_APP_LAUNCH</key>
     <string>1</string>
   </dict>
@@ -108,9 +176,8 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Info.plist 경로 치환 (공백 포함 프로젝트 경로)
-/usr/bin/sed -i '' "s|REPLACE_MPLCONFIGDIR|${ROOT}/.matplotlib|g" "$CONTENTS/Info.plist" 2>/dev/null || \
-  sed -i "s|REPLACE_MPLCONFIGDIR|${ROOT}/.matplotlib|g" "$CONTENTS/Info.plist"
+# MPLCONFIGDIR 는 런처가 실행 시 데이터 폴더로 설정한다.
+# Info.plist 에 개발자 절대경로를 넣지 않는다.
 
 chmod +x "$ROOT/scripts/jarvis_launcher.sh"
 
@@ -140,9 +207,10 @@ if [[ -f "$ROOT/assets/AppIcon.icns" ]]; then
   cp "$ROOT/assets/AppIcon.icns" "$RESOURCES/AppIcon.icns"
 fi
 
-# Gatekeeper 격리 완화 + ad-hoc 서명
-if command -v codesign >/dev/null 2>&1; then
-  codesign --force --deep --sign - "$APP_DIR" 2>/dev/null || true
+# Developer ID 가 있을 때만 서명. 없으면 ad-hoc 서명도 하지 않는다.
+SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1 || true)"
+if [[ -n "${SIGN_ID}" ]]; then
+  codesign --force --deep --options runtime --timestamp --sign "$SIGN_ID" "$APP_DIR"
 fi
 xattr -cr "$APP_DIR" 2>/dev/null || true
 
@@ -154,13 +222,13 @@ install_copy() {
   rm -rf "$dest"
   ditto "$APP_DIR" "$dest"
   xattr -cr "$dest" 2>/dev/null || true
-  if command -v codesign >/dev/null 2>&1; then
-    codesign --force --deep --sign - "$dest" 2>/dev/null || true
+  if [[ -n "${SIGN_ID:-}" ]]; then
+    codesign --force --deep --options runtime --timestamp --sign "$SIGN_ID" "$dest"
   fi
   echo "✓ ${label}: ${dest}"
 }
 
-case "${1:---all}" in
+case "$INSTALL_MODE" in
   --desktop)   install_copy "$HOME/Desktop/${APP_NAME}.app" "바탕화면" ;;
   --applications) install_copy "$HOME/Applications/${APP_NAME}.app" "응용 프로그램" ;;
   --all)
@@ -169,6 +237,9 @@ case "${1:---all}" in
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  JARVIS.app 설치 완료"
+    if [[ "$RELEASE" == "1" ]]; then
+      echo "  출시 번들 — 데이터: ~/Library/Application Support/JARVIS"
+    fi
     echo "  바탕화면 또는 Launchpad에서 더블클릭"
     echo "  → jarvis_v2.py (IRON MAN HUD) 실행"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -177,7 +248,7 @@ case "${1:---all}" in
     echo "  (프로젝트 폴더에만 생성 — --all 로 바탕화면 설치)"
     ;;
   *)
-    echo "옵션: --all | --desktop | --applications | --project-only"
+    echo "옵션: [--release] --all | --desktop | --applications | --project-only"
     exit 1
     ;;
 esac

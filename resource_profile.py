@@ -3,7 +3,8 @@ J.A.R.V.I.S — 리소스 프로파일 (저사양 / 8GB RAM / Apple Silicon / Wi
 
 환경변수 요약:
   JARVIS_LOW_MEM=1          비전(얼굴·손·제스처) OFF, 640×480, 15 FPS, STT→API 우선
-  JARVIS_VISION_ENABLED   0/1 — LOW_MEM과 무관하게 비전 강제 OFF/ON
+  JARVIS_VISION_ENABLED   0/1 — LOW_MEM과 무관하게 얼굴·카메라 파이프라인 OFF/ON
+  JARVIS_HANDS_ENABLED    0/1 — MediaPipe 손·제스처 마우스·손짓 명령 (기본 0)
   JARVIS_MAIN_LOOP_FPS    메인 루프 상한 FPS (LOW_MEM 기본 15, 일반 30)
   JARVIS_CAM_WIDTH/HEIGHT 카메라 해상도 (LOW_MEM 기본 640×480)
   JARVIS_STT_BACKEND      auto | local | api
@@ -26,7 +27,7 @@ def is_low_mem() -> bool:
 
 
 def vision_enabled() -> bool:
-    """얼굴·MediaPipe 손·제스처 마우스 등 비전 파이프라인 사용 여부."""
+    """얼굴 인식·카메라 프레임 등 비전 파이프라인 (손/MediaPipe는 hands_enabled)."""
     if is_low_mem():
         return False
     return os.getenv("JARVIS_VISION_ENABLED", "1").strip().lower() not in (
@@ -46,8 +47,17 @@ def main_loop_fps() -> float:
     return max(5.0, float(os.getenv("JARVIS_MAIN_LOOP_FPS", default)))
 
 
-def hand_complexity() -> int:
+def hands_enabled() -> bool:
+    """MediaPipe Hands · 제스처 마우스 · 손짓 명령 (얼굴 인식과 별도)."""
     if not vision_enabled():
+        return False
+    return os.getenv("JARVIS_HANDS_ENABLED", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def hand_complexity() -> int:
+    if not hands_enabled():
         return 0
     low = is_low_mem()
     return int(os.getenv("JARVIS_HAND_COMPLEXITY", "0" if low else "1"))
@@ -87,6 +97,7 @@ def performance_profile_summary() -> dict:
         "apple_silicon": is_apple_silicon(),
         "low_mem": is_low_mem(),
         "vision": vision_enabled(),
+        "hands": hands_enabled(),
         "camera": camera_resolution(),
         "main_loop_fps": main_loop_fps(),
         "stt_process": stt_process_enabled(),

@@ -46,10 +46,14 @@ except Exception:
     net = requests
 
 try:
-    import yfinance as yf
-    YF_AVAILABLE = True
+    from stock_quant import YF_AVAILABLE, yf
 except ImportError:
-    YF_AVAILABLE = False
+    try:
+        import yfinance as yf
+        YF_AVAILABLE = True
+    except ImportError:
+        YF_AVAILABLE = False
+        yf = None
 
 from portfolio_manager import get_usdkrw_rate, _fetch_current_price
 
@@ -463,10 +467,10 @@ class WhaleTracker:
         self._thread.start()
         _log(f"감시 시작: {', '.join(self.watchlist)} | 간격={self.interval}초")
 
-    def stop(self):
+    def stop(self, timeout: float = 0.25):
         self._running = False
-        if self._thread:
-            self._thread.join(timeout=5)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
 
     def get_events(self):
         events = []
@@ -481,14 +485,17 @@ class WhaleTracker:
                 self._event_q.appendleft(evt)
 
     def _loop(self):
-        time.sleep(12)
+        for _ in range(48):
+            if not self._running:
+                return
+            time.sleep(0.25)
         while self._running:
             self._check_count += 1
             self.check_once()
-            slept = 0
+            slept = 0.0
             while self._running and slept < self.interval:
-                time.sleep(5)
-                slept += 5
+                time.sleep(0.25)
+                slept += 0.25
 
     def check_once(self):
         sells = []

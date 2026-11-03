@@ -108,18 +108,17 @@ def build_followup_briefing(
         price_txt = _fmt_price(consensus, cur)
         if dev >= _CORRECTION_TOL:
             lead = (
-                f"{USER_DISPLAY_NAME}, 방금 예비로 알려드린 값을 정정할게요. "
-                f"{n_src}개 무료 채널을 교차검증해 보니 {name} 합의가는 {price_txt}이에요. "
+                f"{USER_DISPLAY_NAME}, I have an update on the preliminary quote. "
+                f"After cross-validating {n_src} sources, the consensus price for {name} is {price_txt}. "
             )
         else:
             lead = (
-                f"{USER_DISPLAY_NAME}, 교차검증까지 끝냈어요. "
-                f"{n_src}개 채널 값이 거의 일치해요. "
+                f"{USER_DISPLAY_NAME}, cross-validation across {n_src} sources is complete and confirms the quote. "
             )
     elif n_src:
-        lead = f"{USER_DISPLAY_NAME}, {n_src}개 무료 채널을 교차검증하고 AI 정밀 분석까지 마쳤어요. "
+        lead = f"{USER_DISPLAY_NAME}, I have completed the multi-source cross-validation and AI analysis across {n_src} channels. "
     else:
-        lead = f"{USER_DISPLAY_NAME}, 교차검증 분석을 마쳤어요. "
+        lead = f"{USER_DISPLAY_NAME}, the cross-validation analysis is complete. "
 
     return polish_for_voice((lead + narrative).strip())
 

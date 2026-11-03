@@ -39,7 +39,19 @@ def _log_warn_throttled(msg: str) -> None:
         _log("WARN", msg)
 
 
+def _power_save_stt_off() -> bool:
+    try:
+        from power_save_mode import is_active
+        return is_active()
+    except ImportError:
+        return os.getenv("JARVIS_POWER_SAVE", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+
+
 def resolve_stt_mode(openai_api_key: str = "") -> str:
+    if _power_save_stt_off():
+        return "off"
     try:
         from free_mode import free_only_enabled
         if free_only_enabled():
@@ -64,7 +76,41 @@ def use_process_pool() -> bool:
 
 
 def should_preload_local_whisper() -> bool:
+    if _power_save_stt_off():
+        return False
     return resolve_stt_mode() == "local"
+
+
+def _stt_lang() -> str:
+    raw = (os.getenv("JARVIS_STT_LANG") or os.getenv("JARVIS_LANG") or "").strip().lower()
+    if raw:
+        try:
+            from i18n import normalize_lang
+            return normalize_lang(raw)
+        except Exception:
+            for code in ("en", "zh", "ko", "ja", "es"):
+                if raw.startswith(code):
+                    return code
+            return raw
+    try:
+        from i18n import get_lang_meta
+        return str(get_lang_meta()["stt_lang"])
+    except Exception:
+        return "en"
+
+
+def _load_wav_float32(wav_path: str):
+    """16kHz 16-bit mono WAV 파일을 numpy float32 배열로 직접 읽어 PyAV(av.open metadata_errors) 호환성 오류를 우회하고 디코딩 속도를 높인다."""
+    try:
+        import wave
+        import numpy as np
+        with wave.open(wav_path, "rb") as wf:
+            if wf.getnchannels() == 1 and wf.getsampwidth() == 2 and wf.getframerate() == 16000:
+                raw = wf.readframes(wf.getnframes())
+                return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    except Exception:
+        pass
+    return wav_path
 
 
 def _worker_init():
@@ -79,11 +125,13 @@ def _wake_worker_init():
     _worker_model = get_whisper_model(role="wake")
 
 
-def _worker_transcribe(wav_path: str, language: str = "ko") -> str:
+def _worker_transcribe(wav_path: str, language: str | None = None) -> str:
     global _worker_model
     if _worker_model is None:
         _worker_init()
-    segments, _ = _worker_model.transcribe(wav_path, language=language)
+    lang = language or _stt_lang()
+    audio_in = _load_wav_float32(wav_path)
+    segments, _ = _worker_model.transcribe(audio_in, language=lang, beam_size=1, condition_on_previous_text=False)
     return " ".join(seg.text.strip() for seg in segments).strip()
 
 
@@ -108,10 +156,19 @@ def shutdown_process_pool() -> None:
     with _pool_lock:
         for pool in (_process_pool, _wake_process_pool):
             if pool is not None:
+                procs = getattr(pool, "_processes", None) or {}
                 try:
                     pool.shutdown(wait=False, cancel_futures=True)
                 except TypeError:
                     pool.shutdown(wait=False)
+                except Exception:
+                    pass
+                for p in list(procs.values()):
+                    try:
+                        if p is not None and p.is_alive():
+                            p.terminate()
+                    except Exception:
+                        pass
         _process_pool = None
         _wake_process_pool = None
 
@@ -123,44 +180,50 @@ def _retire_process_pool() -> None:
     shutdown_process_pool()
 
 
-def transcribe_audio_api(wav_path: str, client, language: str = "ko") -> str:
+def transcribe_audio_api(wav_path: str, client, language: str | None = None) -> str:
     if client is None:
-        _log("WARN", "OpenAI 클라이언트 없음 — API STT 불가")
+        _log("WARN", "No OpenAI client — API STT unavailable")
         return ""
+    lang = language or _stt_lang()
     try:
         with open(wav_path, "rb") as f:
             resp = client.audio.transcriptions.create(
                 model="whisper-1",
                 file=f,
                 response_format="text",
-                language=language,
+                language=lang,
             )
         text = (resp if isinstance(resp, str) else getattr(resp, "text", "") or "").strip()
         if text:
-            _log("OK", f"API 인식: {text}")
+            _log("OK", f"API transcript: {text}")
         return text
     except Exception as e:
-        _log("ERR", f"API STT 실패: {e}")
+        _log("ERR", f"API STT failed: {e}")
         return ""
 
 
-def transcribe_audio_local(wav_path: str, *, role: str = "main", language: str = "ko") -> str:
+def transcribe_audio_local(wav_path: str, *, role: str = "main", language: str | None = None) -> str:
+    import time as _time
     from whisper_pool import get_whisper_model, invalidate_mlx_repo, _mlx_repo, _resolve_size
 
+    lang = language or _stt_lang()
     for attempt in range(2):
         try:
+            t0 = _time.perf_counter()
             model = get_whisper_model(role=role)
-            segments, _ = model.transcribe(wav_path, language=language)
+            audio_in = _load_wav_float32(wav_path)
+            segments, _ = model.transcribe(audio_in, language=lang, beam_size=1, condition_on_previous_text=False)
             text = " ".join(seg.text.strip() for seg in segments).strip()
+            dt_ms = (_time.perf_counter() - t0) * 1000
             if text:
-                _log("OK", f"로컬 인식: {text}")
+                _log("OK", f"Local transcript ({dt_ms:.0f}ms): {text}")
             return text
         except Exception as e:
             if attempt == 0:
                 size = _resolve_size(role, None)
                 invalidate_mlx_repo(_mlx_repo(size))
                 continue
-            _log("ERR", f"로컬 STT 실패: {e}")
+            _log("ERR", f"Local STT failed: {e}")
             return ""
     return ""
 
@@ -170,29 +233,34 @@ def transcribe_audio(
     openai_client=None,
     *,
     role: str = "main",
-    language: str = "ko",
+    language: str | None = None,
 ) -> str:
+    lang = language or _stt_lang()
     mode = resolve_stt_mode(
         getattr(openai_client, "api_key", None) or os.getenv("OPENAI_API_KEY", "")
     )
     _log("INFO", f"STT ({mode}{'+proc' if mode == 'local' and use_process_pool() else ''})...")
 
+    if mode == "off":
+        _log("INFO", "Power save mode — Whisper/STT disabled (use text input)")
+        return ""
+
     if mode == "api":
-        text = transcribe_audio_api(wav_path, openai_client, language=language)
+        text = transcribe_audio_api(wav_path, openai_client, language=lang)
         if text:
             return text
-        _log("WARN", "API STT 빈 결과/실패 → 로컬 폴백 시도")
-        return transcribe_audio_local(wav_path, role=role, language=language)
+        _log("WARN", "API STT empty/failed -> trying local fallback")
+        return transcribe_audio_local(wav_path, role=role, language=lang)
 
     if use_process_pool():
         try:
             pool = _get_process_pool()
-            return pool.submit(_worker_transcribe, wav_path, language).result(timeout=120)
+            return pool.submit(_worker_transcribe, wav_path, lang).result(timeout=120)
         except Exception as e:
             _retire_process_pool()
-            _log_warn_throttled(f"프로세스 STT 실패 → 맥 CPU로 되돌림: {describe_error(e)}")
+            _log_warn_throttled(f"Process STT failed -> falling back to Mac CPU: {describe_error(e)}")
 
-    return transcribe_audio_local(wav_path, role=role, language=language)
+    return transcribe_audio_local(wav_path, role=role, language=lang)
 
 
 def transcribe_audio_async(
@@ -202,17 +270,18 @@ def transcribe_audio_async(
     on_error: Optional[Callable[[Exception], None]] = None,
     *,
     role: str = "main",
-    language: str = "ko",
+    language: str | None = None,
 ) -> threading.Thread:
+    lang = language or _stt_lang()
     def _run():
         try:
             text = transcribe_audio(
-                wav_path, openai_client, role=role, language=language,
+                wav_path, openai_client, role=role, language=lang,
             )
             if on_done:
                 on_done(text)
         except Exception as e:
-            _log("ERR", f"비동기 STT: {e}")
+            _log("ERR", f"Async STT: {e}")
             if on_error:
                 on_error(e)
             elif on_done:
@@ -240,24 +309,25 @@ def transcribe_wake_clip(
     mode = resolve_stt_mode(
         getattr(openai_client, "api_key", None) or os.getenv("OPENAI_API_KEY", "")
     )
+    lang = _stt_lang()
 
     if mode == "api":
         try:
-            text = transcribe_audio_api(wav_path, openai_client, language="ko").lower()
+            text = transcribe_audio_api(wav_path, openai_client, language=lang).lower()
             if not text:
                 return False, True, text
             if _wake_text_matches(text, wake_words):
                 return True, True, text
             return False, True, text
         except Exception as e:
-            _log("WARN", f"웨이크 API STT failed: {e}")
+            _log("WARN", f"Wake API STT failed: {e}")
             return False, False, ""
 
     if use_process_pool():
         try:
             pool = _get_wake_process_pool()
             text = pool.submit(
-                _worker_transcribe, wav_path, "ko",
+                _worker_transcribe, wav_path, lang,
             ).result(timeout=30).strip().lower()
             if not text:
                 return False, True, text
@@ -266,13 +336,14 @@ def transcribe_wake_clip(
             return False, True, text
         except Exception as e:
             _retire_process_pool()
-            _log_warn_throttled(f"웨이크 프로세스 STT 실패 → 맥 CPU로 되돌림: {describe_error(e)}")
+            _log_warn_throttled(f"Wake process STT failed -> falling back to Mac CPU: {describe_error(e)}")
 
     try:
         from whisper_pool import get_whisper_model
         model = get_whisper_model(role="wake")
+        audio_in = _load_wav_float32(wav_path)
         segments, _ = model.transcribe(
-            wav_path, language="ko", beam_size=1, condition_on_previous_text=False,
+            audio_in, language=lang, beam_size=1, condition_on_previous_text=False,
         )
         text = " ".join(seg.text.strip() for seg in segments).strip().lower()
         if not text:
@@ -281,9 +352,9 @@ def transcribe_wake_clip(
             return True, True, text
         return False, True, text
     except Exception as e:
-        _log("WARN", f"웨이크 로컬 STT 실패: {e}")
+        _log("WARN", f"Wake local STT failed: {e}")
         if openai_client:
-            text = transcribe_audio_api(wav_path, openai_client, language="ko").lower()
+            text = transcribe_audio_api(wav_path, openai_client, language=lang).lower()
             if not text:
                 return False, True, text
             if _wake_text_matches(text, wake_words):

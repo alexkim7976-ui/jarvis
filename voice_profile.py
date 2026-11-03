@@ -35,7 +35,8 @@ import pyaudio
 #  설정 — 프로젝트 루트 기준 절대 경로 (앱/터미널 cwd 무관)
 # ──────────────────────────────────────────────
 _PROJECT_ROOT = Path(__file__).resolve().parent
-VOICE_DIR = Path(os.getenv("JARVIS_VOICE_PROFILE_DIR", str(_PROJECT_ROOT / "voice_profile")))
+_DATA_ROOT = Path(os.getenv("JARVIS_DATA_DIR") or _PROJECT_ROOT).expanduser()
+VOICE_DIR = Path(os.getenv("JARVIS_VOICE_PROFILE_DIR", str(_DATA_ROOT / "voice_profile")))
 VOICE_DIR.mkdir(parents=True, exist_ok=True)
 try:
     os.chmod(str(VOICE_DIR), 0o700)
@@ -249,11 +250,11 @@ class VoiceProfile:
             _log("등록된 기기 — 저장 샘플에서 프로필 복구를 시도했으나 실패. V키로 재등록하세요.")
 
     def start_collection(self, target=TARGET_SAMPLES):
-        """샘플 수집 모드 시작 — 이미 학습됐으면 스킵."""
+        """Start voice sample collection mode — skip if already trained."""
         if self.trained:
             return {
                 "success": True,
-                "message": f"이 기기는 이미 음성 등록됨 ({self._sample_count}샘플). 추가 등록 불필요.",
+                "message": f"Voice profile already enrolled on this device ({self._sample_count} samples).",
                 "remaining": 0,
                 "trained": True,
                 "skipped": True,
@@ -261,7 +262,7 @@ class VoiceProfile:
         if is_known_device() and self._try_retrain_from_samples():
             return {
                 "success": True,
-                "message": f"등록된 기기 — 저장된 샘플 {self._sample_count}개로 자동 복구 완료.",
+                "message": f"Enrolled device — automatically restored from {self._sample_count} saved samples.",
                 "remaining": 0,
                 "trained": True,
                 "skipped": True,
@@ -269,11 +270,11 @@ class VoiceProfile:
         self.collecting = True
         self._collect_count = 0
         self._collect_target = target
-        _log(f"샘플 수집 시작 ({target}회)")
-        _log("준비되면 '자비스'라고 말씀해주세요...")
+        _log(f"Starting sample collection ({target} samples)")
+        _log("When ready, please say 'Jarvis'...")
         return {
             "success": True,
-            "message": f"음성 수집 모드 시작. '자비스'라고 {target}번 말씀해주세요.",
+            "message": f"Voice enrollment started. Please say 'Jarvis' {target} times.",
             "remaining": target,
         }
 
@@ -307,8 +308,8 @@ class VoiceProfile:
         rms = int((sum(s * s for s in shorts) / count) ** 0.5)
 
         if rms < 300:
-            _log("무음 감지 — 다시 시도해주세요")
-            return {"success": False, "message": "소리가 너무 작습니다. 다시 말씀해주세요."}
+            _log("Silence detected — please try again")
+            return {"success": False, "message": "Audio was too quiet. Please speak again."}
 
         # WAV 저장
         self._collect_count += 1
@@ -325,7 +326,7 @@ class VoiceProfile:
             self._templates.append(mfcc)
 
         remaining = self._collect_target - self._collect_count
-        _log(f"샘플 {self._collect_count} 저장 완료! (남은: {remaining})")
+        _log(f"Sample {self._collect_count} saved! (Remaining: {remaining})")
 
         # 수집 완료 확인
         if self._collect_count >= self._collect_target:
@@ -333,14 +334,14 @@ class VoiceProfile:
             self._train()
             return {
                 "success": True,
-                "message": f"모든 샘플 수집 완료! {self._collect_count}개로 학습 완료.",
+                "message": f"All {self._collect_count} voice samples collected and trained!",
                 "remaining": 0,
                 "trained": True,
             }
 
         return {
             "success": True,
-            "message": f"샘플 {self._collect_count}/{self._collect_target} 저장.",
+            "message": f"Sample {self._collect_count}/{self._collect_target} saved.",
             "remaining": remaining,
         }
 

@@ -17,10 +17,14 @@ try:
 except ImportError:  # Windows
     _HAS_FCNTL = False
 
-# ── 감사 로그 설정 ──
-_LOG_DIR = Path(".logs")
-_LOG_DIR.mkdir(exist_ok=True)
-os.chmod(str(_LOG_DIR), 0o700)
+# ── 감사 로그 설정 (출시 앱: JARVIS_DATA_DIR/.logs 우선) ──
+_DATA_ROOT_SEC = (os.getenv("JARVIS_DATA_DIR") or "").strip()
+_LOG_DIR = (Path(_DATA_ROOT_SEC).expanduser() / ".logs") if _DATA_ROOT_SEC else Path(".logs")
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    os.chmod(str(_LOG_DIR), 0o700)
+except OSError:
+    pass
 
 _audit_logger = logging.getLogger("jarvis.security")
 _audit_logger.setLevel(logging.INFO)

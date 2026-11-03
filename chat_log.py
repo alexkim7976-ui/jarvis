@@ -5,7 +5,7 @@ from __future__ import annotations
 import time, threading, cv2, numpy as np
 from datetime import datetime
 from collections import deque
-from korean_font import put_text, wrap_text, text_width
+from korean_font import put_text, wrap_text, text_width, blend_rect
 
 CYAN=(255,220,0); CYAN_DIM=(180,140,0); CYAN_DARK=(100,80,0)
 USER_COLOR=(220,180,100); JARVIS_COLOR=(100,255,180)
@@ -66,14 +66,12 @@ class ChatLog:
         with self._lock: msgs=list(self._messages)
         if not msgs: return frame
 
-        self._scroll+=(self._target_scroll-self._scroll)*0.15
+        self._scroll+=(self._target_scroll-self._scroll)*0.22
         px=self.panel_x; py=self.panel_y; pw=self.panel_w
         panel_h=self._visible*self.line_h+40
 
-        # 배경
-        ov=frame.copy()
-        cv2.rectangle(ov,(px,py),(px+pw,py+panel_h),PANEL_BG,-1)
-        cv2.addWeighted(ov,0.65,frame,0.35,0,frame)
+        # 배경 (ROI 슬라이스 블렌딩 — 전체 프레임 복사 없음)
+        blend_rect(frame, px, py, px+pw, py+panel_h, PANEL_BG, 0.58)
         cv2.rectangle(frame,(px,py),(px+pw,py+panel_h),CYAN_DARK,1,cv2.LINE_AA)
 
         # 헤더
@@ -83,9 +81,8 @@ class ChatLog:
 
         # 플래시
         if t-self._flash<0.5:
-            a=0.3*(1-(t-self._flash)/0.5); ov2=frame.copy()
-            cv2.rectangle(ov2,(px,py),(px+pw,py+panel_h),JARVIS_COLOR,-1)
-            cv2.addWeighted(ov2,a,frame,1-a,0,frame)
+            a=0.3*(1-(t-self._flash)/0.5)
+            blend_rect(frame, px, py, px+pw, py+panel_h, JARVIS_COLOR, a)
 
         # 메시지 펼치기
         all_lines=[]

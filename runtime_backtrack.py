@@ -153,36 +153,36 @@ def call_tool_backend(name: str, args: dict | None) -> dict:
 
 
 def offline_tool_result(name: str) -> dict:
-    """로컬 실행까지 실패했을 때의 오프라인 안내. 성공한 척하지 않는다."""
+    """Offline fallback message when local execution also fails."""
     if name in OFFLINE_TOOLS:
         return {
             "success": False,
             "offline": True,
-            "message": "이 작업은 오프라인으로 이 맥에서 처리하는데, 지금은 실패했습니다. 다시 말씀해 주세요.",
+            "message": "This task runs offline on your Mac, but it failed this time. Please try again.",
         }
     return {
         "success": False,
         "offline": True,
-        "message": "지금은 오프라인입니다. 파일, 시스템 상태, 일정, 소리 조절은 이 맥에서 계속 됩니다.",
+        "message": "Currently offline. Files, system status, calendar, and volume control remain available on this Mac.",
     }
 
 
 def offline_reply(text: str) -> str | None:
-    """LLM·네트워크가 없을 때 맥에서 바로 답할 수 있는 몇 가지."""
+    """Immediate local replies when LLM/network is unavailable."""
     raw = (text or "").strip().lower()
     if not raw:
         return None
-    if any(k in raw for k in ("몇 시", "지금 시간", "현재 시간", "오늘 날짜")):
+    if any(k in raw for k in ("몇 시", "지금 시간", "현재 시간", "오늘 날짜", "what time", "current time", "date today")):
         now = datetime.now()
-        return now.strftime("지금은 %Y년 %m월 %d일 %H시 %M분입니다. 오프라인 상태입니다.")
-    if any(k in raw for k in ("cpu", "메모리", "시스템 상태", "용량", "디스크")):
+        return now.strftime("It is currently %Y-%m-%d %H:%M. Running in offline mode.")
+    if any(k in raw for k in ("cpu", "메모리", "시스템 상태", "용량", "디스크", "memory", "system status", "disk")):
         try:
-            if "용량" in raw or "디스크" in raw:
+            if "용량" in raw or "디스크" in raw or "disk" in raw:
                 from file_manager import execute_tool
                 res = execute_tool("get_disk_usage", {})
             else:
                 from system_monitor import execute_system_tool
-                if "메모리" in raw:
+                if "메모리" in raw or "memory" in raw:
                     res = execute_system_tool("get_memory_usage", {})
                 elif "cpu" in raw:
                     res = execute_system_tool("get_cpu_usage", {})
@@ -228,7 +228,7 @@ def guard_tool(
         log_fn("WARN", f"{name} 모든 경로 실패 — {detail}")
     return {
         "success": False,
-        "message": "지금은 처리하지 못했습니다. 파일·시스템·일정·소리 조절은 이 맥에서 계속 됩니다.",
+        "message": "Could not complete that request right now. File, system, calendar, and volume controls remain available on this Mac.",
     }
 
 
@@ -237,6 +237,6 @@ def ollama_failure_reply(user_text: str, exc: BaseException | None = None) -> st
     if local:
         return local
     return (
-        "로컬 AI에 연결하지 못했습니다. "
-        "시간, 시스템 상태, 파일, 일정, 소리 조절은 오프라인으로 계속 됩니다."
+        "Could not connect to the local AI engine. "
+        "Time, system status, files, calendar, and volume controls remain available offline."
     )

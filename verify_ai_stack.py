@@ -38,7 +38,7 @@ def check_ollama() -> None:
     _ok("Ollama 서버 연결")
 
 
-def check_models() -> None:
+def check_models(*, quick: bool = False) -> None:
     from ollama_vision import vision_model_ready
     from ollama_agent import get_stock_model, OLLAMA_MODEL, model_supports_tools
 
@@ -56,7 +56,10 @@ def check_models() -> None:
         print(f"  ⚠ 차트비전: {msg[:120]}")
         print("  · S키 차트 분석은 비활성 — 종목명 음성 분석은 정상")
 
-    if not model_supports_tools():
+    if quick:
+        print(f"  · {OLLAMA_MODEL} — 도구 호출 (빠른 검증: Ollama 실제 ping 생략)")
+        return
+    if not model_supports_tools(probe=True):
         _fail(f"{OLLAMA_MODEL} — 도구 호출 미지원 (gemma4 권장)")
     _ok(f"{OLLAMA_MODEL} — 도구 호출 지원")
 
@@ -98,9 +101,13 @@ def check_routing() -> None:
 
 def main() -> int:
     print("━━━━━━━━ JARVIS AI 스택 검증 ━━━━━━━━")
-    quick = "--quick" in sys.argv or os.getenv("JARVIS_APP_LAUNCH", "").strip() == "1"
+    quick = (
+        "--quick" in sys.argv
+        or os.getenv("JARVIS_APP_LAUNCH", "").strip() == "1"
+        or os.getenv("JARVIS_QUICK_START", "").strip() == "1"
+    )
     check_ollama()
-    check_models()
+    check_models(quick=quick)
     check_free_mode()
     if not quick:
         check_routing()

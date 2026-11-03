@@ -26,10 +26,14 @@ from pathlib import Path
 from datetime import datetime
 
 try:
-    import yfinance as yf
-    YF_AVAILABLE = True
+    from stock_quant import YF_AVAILABLE, yf
 except ImportError:
-    YF_AVAILABLE = False
+    try:
+        import yfinance as yf
+        YF_AVAILABLE = True
+    except ImportError:
+        YF_AVAILABLE = False
+        yf = None
 
 # 한글 종목명 → 야후 티커 변환 재사용 (stock_quant 와 동일 컨벤션)
 try:
@@ -41,7 +45,17 @@ except Exception:  # 단독 실행 등 import 실패 시 폴백
 # ──────────────────────────────────────────────
 #  설정
 # ──────────────────────────────────────────────
-PORTFOLIO_FILE   = Path(os.getenv("PORTFOLIO_FILE", "portfolio.json"))
+def _default_portfolio_path() -> Path:
+    raw = os.getenv("PORTFOLIO_FILE", "portfolio.json").strip()
+    p = Path(raw)
+    if not p.is_absolute():
+        dd = (os.getenv("JARVIS_DATA_DIR") or "").strip()
+        if dd:
+            p = Path(dd).expanduser() / p
+    return p
+
+
+PORTFOLIO_FILE   = _default_portfolio_path()
 FALLBACK_USDKRW  = float(os.getenv("USDKRW_FALLBACK", "1380"))   # 환율 조회 실패 시 안전값
 EXRATE_CACHE_SEC = 600                                          # 환율 캐시 유효 시간(초)
 

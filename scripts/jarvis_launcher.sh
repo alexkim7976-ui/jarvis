@@ -74,6 +74,9 @@ export JARVIS_DATA_DIR="$DATA_ROOT"
 export JARVIS_SKIP_WARMUP=1
 export JARVIS_SKIP_BOOT_AUDIT=1
 export JARVIS_SKIP_OPENCLAW_BOOT=1
+export JARVIS_FAST_BOOT=1
+export JARVIS_SKIP_AI_VERIFY=1
+export JARVIS_LOCATION_TIMEOUT=2.5
 export PYTHONUNBUFFERED=1
 export MPLCONFIGDIR="${MPLCONFIGDIR:-$DATA_ROOT/.matplotlib}"
 export HF_HOME="${HF_HOME:-$CACHE_DIR/huggingface}"
@@ -81,6 +84,12 @@ export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$CACHE_DIR}"
 export AUDIO_SAVE_DIR="${AUDIO_SAVE_DIR:-$DATA_ROOT/audio_cache}"
 export CFBundleIdentifier="${CFBundleIdentifier:-com.jarvis.assistant}"
 export __CFBundleIdentifier="${CFBundleIdentifier:-com.jarvis.assistant}"
+# 디버그·타이밍 로그는 환경변수로만 켠다. 릴리스 기본값은 꺼짐.
+export JARVIS_DEBUG="${JARVIS_DEBUG:-0}"
+export JARVIS_TIMING_LOG="${JARVIS_TIMING_LOG:-0}"
+export GLOG_minloglevel="${GLOG_minloglevel:-2}"
+export ABSL_MIN_LOG_LEVEL="${ABSL_MIN_LOG_LEVEL:-2}"
+export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-3}"
 
 # 출시 모드: 코드 트리에 쓰기 가능한 경로 심볼릭 링크
 if [[ "$RELEASE_MODE" == "1" ]]; then
@@ -103,6 +112,8 @@ if [[ "$RELEASE_MODE" == "1" ]]; then
 fi
 
 log_line() {
+  # 상세 런처 로그는 JARVIS_DEBUG=1 일 때만 파일에 남긴다.
+  [[ "${JARVIS_DEBUG:-0}" == "1" ]] || return 0
   echo "$1" >> "$LOGFILE"
 }
 
@@ -117,13 +128,16 @@ notify() {
 }
 
 ensure_ollama() {
+  local max_wait="${1:-10}"
   if curl -sf --max-time 2 "http://127.0.0.1:11434/api/tags" >/dev/null 2>&1; then
     return 0
   fi
   if [[ -d "/Applications/Ollama.app" ]]; then
     open -g -a Ollama 2>/dev/null || true
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
+    local i=0
+    while (( i < max_wait )); do
       sleep 1
+      i=$((i + 1))
       curl -sf --max-time 2 "http://127.0.0.1:11434/api/tags" >/dev/null 2>&1 && return 0
     done
   fi
@@ -138,23 +152,77 @@ open_location_settings() {
   open "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices" 2>/dev/null || true
 }
 
+_run_with_timeout() {
+  local secs="$1"
+  shift
+  "$@" 2>/dev/null &
+  local pid=$!
+  (
+    sleep "$secs"
+    kill "$pid" 2>/dev/null
+  ) &
+  wait "$pid" 2>/dev/null
+  return 0
+}
+
 request_app_permissions() {
   [[ -n "$BUNDLE" ]] || return 0
   local macos="$BUNDLE/Contents/MacOS"
   if [[ -x "$macos/jarvis-camcheck" ]]; then
-    "$macos/jarvis-camcheck" 2>/dev/null || open_privacy_settings
+    _run_with_timeout 2 "$macos/jarvis-camcheck" || open_privacy_settings &
   fi
   if [[ -x "$macos/jarvis-miccheck" ]]; then
-    "$macos/jarvis-miccheck" 2>/dev/null || true
+    _run_with_timeout 2 "$macos/jarvis-miccheck" &
   fi
   if [[ -x "$macos/jarvis-loccheck" ]]; then
-    "$macos/jarvis-loccheck" 2>/dev/null || open_location_settings
+    # 위치 권한 팝업은 HUD 기동 후에도 가능 — 실행 경로에서 길게 막지 않음
+    _run_with_timeout 2 "$macos/jarvis-loccheck" || open_location_settings &
   fi
+}
+
+venv_healthy() {
+  [[ -x "$PY" ]] || return 1
+  local stamp="$DATA_ROOT/.venv/.jarvis_venv_ok"
+  local req="$CODE_ROOT/requirements.txt"
+  if [[ -f "$stamp" ]]; then
+    if [[ ! -f "$req" ]] || [[ "$stamp" -nt "$req" ]]; then
+      return 0
+    fi
+  fi
+  if "$PY" -c "import cv2, tkinter" >/dev/null 2>&1; then
+    touch "$stamp" 2>/dev/null || true
+    return 0
+  fi
+  rm -f "$stamp" 2>/dev/null || true
+  return 1
+}
+
+ensure_default_env() {
+  [[ -f "$DATA_ROOT/.env" ]] && return 0
+  local template=""
+  for candidate in \
+    "$CODE_ROOT/scripts/release.env.example" \
+    "$RESOURCES/release.env.example" \
+    "$CODE_ROOT/.env.example"; do
+    if [[ -f "$candidate" ]]; then
+      template="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$template" ]]; then
+    return 1
+  fi
+  cp "$template" "$DATA_ROOT/.env"
+  chmod 600 "$DATA_ROOT/.env" 2>/dev/null || true
+  log_line "seed .env ← $template"
+  return 0
 }
 
 run_setup_wizard() {
   local helper_py=""
-  if [[ -x "/usr/bin/python3" ]]; then
+  if [[ -x "$PY" ]]; then
+    helper_py="$PY"
+  elif [[ -x "/usr/bin/python3" ]]; then
     helper_py="/usr/bin/python3"
   elif command -v python3 >/dev/null 2>&1; then
     helper_py="$(command -v python3)"
@@ -226,7 +294,10 @@ APPLESCRIPT
 bootstrap_bundled_venv() {
   # FULL 패키지: Resources/venv → Application Support/.venv 1회 복사
   [[ "$RELEASE_MODE" == "1" ]] || return 0
-  [[ -x "$PY" ]] && return 0
+  if venv_healthy; then
+    return 0
+  fi
+  log_line "venv missing or broken — refresh from bundled Resources/venv"
   local boot="$RESOURCES/bootstrap_venv.sh"
   if [[ -x "$boot" ]]; then
     "$boot" "$DATA_ROOT" "$RESOURCES" >> "$LOGFILE" 2>&1 || true
@@ -246,22 +317,25 @@ preflight() {
     exit 1
   fi
 
-  # 출시 모드: .env / venv 없으면 설정 마법사
+  # 출시 모드: 기본 .env 시드 → venv → (선택) 설정 마법사
   if [[ "$RELEASE_MODE" == "1" ]]; then
     bootstrap_bundled_venv
-    if [[ ! -f "$DATA_ROOT/.env" || ! -x "$PY" ]]; then
-      if ! run_setup_wizard; then
-        exit 1
-      fi
-    fi
+    ensure_default_env || true
     bootstrap_bundled_venv
-    # 마법사 후에도 없으면 중단
+    if ! venv_healthy; then
+      run_setup_wizard || true
+      bootstrap_bundled_venv
+    fi
+    if [[ ! -f "$DATA_ROOT/.setup_done" && -f "$DATA_ROOT/.env" ]]; then
+      run_setup_wizard || true
+    fi
+    ensure_default_env || true
     if [[ ! -f "$DATA_ROOT/.env" ]]; then
       alert "JARVIS 설정 필요" ".env 가 없습니다.\n\n$DATA_ROOT"
       exit 1
     fi
-    if [[ ! -x "$PY" ]]; then
-      alert "JARVIS 설치 필요" "가상환경(.venv)이 없습니다.\n설정 마법사에서 설치를 완료하세요.\n\n$DATA_ROOT"
+    if ! venv_healthy; then
+      alert "JARVIS 설치 필요" "가상환경(.venv)이 없거나 손상되었습니다.\n터미널: rm -rf \"$DATA_ROOT/.venv\" 후 앱 재실행\n\n$DATA_ROOT"
       exit 1
     fi
     ln -sfn "$DATA_ROOT/.env" "$CODE_ROOT/.env" 2>/dev/null || true
@@ -298,10 +372,11 @@ fi
 preflight
 request_app_permissions
 
-# 출시 모드에서도 Ollama는 선택
-if ! ensure_ollama; then
-  notify "J.A.R.V.I.S" "Ollama 미실행 — 클라우드/로컬 폴백으로 계속"
-  log_line "WARN: Ollama not ready — continuing"
+# 앱 클릭 직후 Python까지 — Ollama는 짧게만 대기(백그라운드에서 계속 기동)
+if ! ensure_ollama 2; then
+  ( ensure_ollama 15 >> "$LOGFILE" 2>&1 ) &
+  notify "J.A.R.V.I.S" "Ollama 준비 중 — Jarvis는 먼저 시작합니다"
+  log_line "WARN: Ollama not ready — continuing (background wait)"
 fi
 
 notify "J.A.R.V.I.S" "시작 중…"
@@ -311,7 +386,7 @@ log_line "PY=$PY MAIN=$MAIN BUNDLE=$BUNDLE DATA=$DATA_ROOT"
 # shellcheck disable=SC1091
 source "$DATA_ROOT/.venv/bin/activate"
 
-if [[ -f "$CODE_ROOT/verify_ai_stack.py" ]]; then
+if [[ "${JARVIS_SKIP_AI_VERIFY:-0}" != "1" ]] && [[ -f "$CODE_ROOT/verify_ai_stack.py" ]]; then
   if ! "$PY" "$CODE_ROOT/verify_ai_stack.py" --quick >> "$LOGFILE" 2>&1; then
     notify "J.A.R.V.I.S" "AI 검증 경고 — 시작은 계속합니다"
     log_line "WARN: verify_ai_stack failed — continuing"
@@ -320,4 +395,8 @@ fi
 
 log_line "exec: $PY $MAIN"
 cd "$CODE_ROOT" || exit 1
-exec -a "J.A.R.V.I.S" "$PY" "$MAIN" >> "$LOGFILE" 2>&1
+# 릴리스 기본: stdout 디버그 로그는 남기지 않는다. JARVIS_DEBUG=1 일 때만 전체 로그.
+if [[ "${JARVIS_DEBUG:-0}" == "1" ]]; then
+  exec -a "J.A.R.V.I.S" "$PY" "$MAIN" >> "$LOGFILE" 2>&1
+fi
+exec -a "J.A.R.V.I.S" "$PY" "$MAIN" 2>> "$LOGFILE" >/dev/null
