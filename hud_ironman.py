@@ -5,7 +5,7 @@ from __future__ import annotations
 import math, time, random, struct, threading
 from datetime import datetime
 import cv2, numpy as np
-from korean_font import put_text, wrap_text
+from korean_font import put_text, wrap_text, blend_rect
 
 CYAN=(255,220,0); CYAN_BRIGHT=(255,255,0); CYAN_DIM=(180,140,0)
 CYAN_DARK=(100,80,0); RED_ALERT=(50,50,255); GREEN=(50,255,50)
@@ -54,8 +54,6 @@ class IronManHUD:
         if state=="PROCESSING" and self._prev_state!="PROCESSING":
             self._proc_start=t
         self._prev_state=state
-        tint=np.zeros_like(frame); tint[:]=(12,8,4)
-        cv2.addWeighted(frame,0.94,tint,0.06,0,frame)
         self._draw_scan_line(frame,h,w)
         self._draw_corner_frame(frame,h,w)
         self._draw_top_bar(frame,w,state,llm_provider)
@@ -76,13 +74,11 @@ class IronManHUD:
     def _draw_processing_banner(self,frame,h,w,t):
         """처리 중임을 명확히 알리는 상단 중앙 배너 — 회전 스피너 + 점 애니메이션 + 경과 초.
         요청이 오래 걸려도 사용자가 '지금 처리 중'임을 항상 인지할 수 있도록 항상 표시."""
+        from i18n import tr
         elapsed=t-(self._proc_start or t)
         bw,bh=380,64
         x0=w//2-bw//2; y0=58
-        # 반투명 앰버 패널
-        ov=frame.copy()
-        cv2.rectangle(ov,(x0,y0),(x0+bw,y0+bh),(20,15,5),-1)
-        cv2.addWeighted(ov,0.58,frame,0.42,0,frame)
+        blend_rect(frame, x0, y0, x0+bw, y0+bh, (20,15,5), 0.58)
         cv2.rectangle(frame,(x0,y0),(x0+bw,y0+bh),AMBER,1,cv2.LINE_AA)
         # 좌측 회전 스피너
         sc=(x0+30,y0+bh//2); a=int(t*300)%360
@@ -90,14 +86,13 @@ class IronManHUD:
         cv2.ellipse(frame,sc,(13,13),0,a,a+270,AMBER,2,cv2.LINE_AA)
         # 점(...) 애니메이션 텍스트
         dots="."*((int(t*2)%3)+1)
-        put_text(frame,f"Analyzing{dots}",(x0+56,y0+26),size=19,color=(0,220,255),bold=True)
-        put_text(frame,f"Elapsed {elapsed:0.0f}s · Please wait a moment",
+        put_text(frame,tr("hud_analyzing", dots=dots),(x0+56,y0+26),size=19,color=(0,220,255),bold=True)
+        put_text(frame,tr("hud_elapsed_wait", sec=f"{elapsed:0.0f}"),
                  (x0+56,y0+50),size=13,color=(0,200,255))
         return frame
 
     def _draw_top_bar(self,frame,w,state,llm):
-        ov=frame.copy(); cv2.rectangle(ov,(0,0),(w,48),PANEL_BG,-1)
-        cv2.addWeighted(ov,0.7,frame,0.3,0,frame)
+        blend_rect(frame, 0, 0, w, 48, PANEL_BG, 0.7)
         cv2.line(frame,(0,48),(w,48),CYAN_DARK,1)
         cv2.putText(frame,"J.A.R.V.I.S",(20,32),cv2.FONT_HERSHEY_DUPLEX,0.8,CYAN_BRIGHT,1,cv2.LINE_AA)
         cv2.putText(frame,"v3.1",(165,32),cv2.FONT_HERSHEY_SIMPLEX,0.4,CYAN_DIM,1,cv2.LINE_AA)
@@ -142,9 +137,7 @@ class IronManHUD:
     def _draw_waveform(self,frame,h,w,state):
         wy=h-85; wx=150; ww=w-300; bw=max(2,ww//42)
         with self._audio_lock: levels=list(self._audio_levels)
-        ov=frame.copy()
-        cv2.rectangle(ov,(wx-10,wy-40),(wx+ww+10,wy+10),PANEL_BG,-1)
-        cv2.addWeighted(ov,0.5,frame,0.5,0,frame)
+        blend_rect(frame, wx-10, wy-40, wx+ww+10, wy+10, PANEL_BG, 0.5)
         cv2.putText(frame,"AUDIO",(wx,wy-45),cv2.FONT_HERSHEY_SIMPLEX,0.28,CYAN_DARK,1,cv2.LINE_AA)
         cv2.line(frame,(wx,wy),(wx+ww,wy),CYAN_DARK,1,cv2.LINE_AA)
         t=time.time()
@@ -161,9 +154,8 @@ class IronManHUD:
             cv2.line(frame,(x,wy-bh),(x,wy+bh),c,bw-1,cv2.LINE_AA)
 
     def _draw_status_panel(self,frame,h,w,state,fc):
-        px=w-180; py=60; ov=frame.copy()
-        cv2.rectangle(ov,(px-10,py),(w-10,py+160),PANEL_BG,-1)
-        cv2.addWeighted(ov,0.48,frame,0.52,0,frame)
+        px=w-180; py=60
+        blend_rect(frame, px-10, py, w-10, py+160, PANEL_BG, 0.48)
         cv2.line(frame,(px-10,py),(px-10,py+160),CYAN_DARK,1,cv2.LINE_AA)
         y=py+18; cv2.putText(frame,"SYSTEM STATUS",(px,y),cv2.FONT_HERSHEY_SIMPLEX,0.32,CYAN,1,cv2.LINE_AA)
         y+=8; cv2.line(frame,(px,y),(w-15,y),CYAN_DARK,1)
@@ -201,18 +193,14 @@ class IronManHUD:
 
     def _draw_scan_line(self,frame,h,w):
         self._scan_y=(self._scan_y+3)%h; y=self._scan_y
-        ov=frame.copy(); cv2.line(ov,(0,y),(w,y),CYAN,1)
-        cv2.addWeighted(ov,0.15,frame,0.85,0,frame)
-        for i in range(1,15):
-            ty=y-i*2
-            if ty<0: ty+=h
-            a=0.06*(1-i/15); ov2=frame.copy()
-            cv2.line(ov2,(0,ty),(w,ty),CYAN_DARK,1)
-            cv2.addWeighted(ov2,a,frame,1-a,0,frame)
+        blend_rect(frame, 0, y, w, y+1, CYAN, 0.15)
+        for i in range(1, 8):
+            ty = (y - i * 3) % h
+            blend_rect(frame, 0, ty, w, ty+1, CYAN_DARK, 0.05 * (1 - i / 8))
 
     def _draw_bottom_text(self,frame,h,w,transcript,answer):
-        ov=frame.copy(); cv2.rectangle(ov,(0,h-60),(w,h),PANEL_BG,-1)
-        cv2.addWeighted(ov,0.6,frame,0.4,0,frame)
+        from i18n import get_lang_meta, tr
+        blend_rect(frame, 0, h-60, w, h, PANEL_BG, 0.6)
         cv2.line(frame,(0,h-60),(w,h-60),CYAN_DARK,1)
         if transcript:
             txt=f"> {transcript[:50]}{'...'if len(transcript)>50 else''}"
@@ -221,7 +209,8 @@ class IronManHUD:
             lines=wrap_text(answer,w-40,14)
             for i,ln in enumerate(lines[:2]):
                 put_text(frame,ln,(20,h-20+i*16),size=14,color=CYAN)
-        cv2.putText(frame,"Enter:Type  POINT:Talk  V:Send  G:Mouse  Q:Quit",(w-360,h-65),cv2.FONT_HERSHEY_SIMPLEX,0.28,CYAN_DARK,1,cv2.LINE_AA)
+        lang_lbl = get_lang_meta()["label"]
+        put_text(frame,tr("hud_bottom_hint", lang=lang_lbl),(max(16, w-460),h-65),size=12,color=CYAN_DARK)
 
     def _draw_particles(self,frame,h,w):
         for p in self._particles:

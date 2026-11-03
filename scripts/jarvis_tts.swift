@@ -43,6 +43,17 @@ func voices(forLang lang: String) -> [AVSpeechSynthesisVoice] {
     }
 }
 
+func defaultVoiceName(forLang lang: String) -> String {
+    let pfx = String(lang.prefix(2)).lowercased()
+    switch pfx {
+    case "ko": return "Yuna"
+    case "zh": return "Tingting"
+    case "ja": return "Kyoko"
+    case "es": return "Mónica"
+    default:   return "Daniel"
+    }
+}
+
 // 선호 이름/식별자 + 품질을 종합해 최적 음성 선택
 func pickVoice(pref: String, lang: String) -> AVSpeechSynthesisVoice? {
     let cands = voices(forLang: lang)
@@ -53,18 +64,20 @@ func pickVoice(pref: String, lang: String) -> AVSpeechSynthesisVoice? {
         if let v = cands.first(where: { $0.identifier == pref }) { return v }
     }
 
-    let defaultName = lang.lowercased().hasPrefix("ko") ? "Yuna" : "Daniel"
+    let defaultName = defaultVoiceName(forLang: lang)
     let target = pref.isEmpty ? defaultName : pref
-    // 2) 이름에 target 을 '포함'하는 후보 중 최고 품질
-    //    (프리미엄/향상 음성은 이름이 "Daniel (Enhanced)" 처럼 접미사가 붙어 정확일치로는 놓친다)
-    let named = cands.filter { $0.name.range(of: target, options: .caseInsensitive) != nil }
+    // 2) 이름에 target 을 '포함'(발음기호/대소문자 무시)하는 후보 중 최고 품질
+    let named = cands.filter {
+        $0.name.range(of: target, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+    }
     let pool = named.isEmpty ? cands : named
 
     func preferredScore(_ v: AVSpeechSynthesisVoice) -> Int {
-        if v.name.range(of: target, options: .caseInsensitive) != nil { return 3 }
-        if v.name.range(of: "Daniel", options: .caseInsensitive) != nil { return 2 }
-        if v.name.range(of: "Samantha", options: .caseInsensitive) != nil { return 2 }
-        if v.name.range(of: "Yuna", options: .caseInsensitive) != nil { return 1 }
+        if v.name.range(of: target, options: [.caseInsensitive, .diacriticInsensitive]) != nil { return 4 }
+        if v.name.range(of: defaultName, options: [.caseInsensitive, .diacriticInsensitive]) != nil { return 3 }
+        for fav in ["Daniel", "Samantha", "Tingting", "Meijia", "Yuna", "Suhyun", "Kyoko", "Mónica", "Paulina"] {
+            if v.name.range(of: fav, options: [.caseInsensitive, .diacriticInsensitive]) != nil { return 2 }
+        }
         return 0
     }
     // 품질 우선(premium>enhanced>default), 동률이면 선호 보이스 우선
@@ -95,7 +108,7 @@ if wantList {
 }
 
 let outPath = popValue("--out")
-let voicePref = popValue("--voice") ?? (lang.lowercased().hasPrefix("ko") ? "Yuna" : "Daniel")
+let voicePref = popValue("--voice") ?? defaultVoiceName(forLang: lang)
 let rateStr = popValue("--rate")
 var text = popValue("--text")
 if let tf = popValue("--textfile") {

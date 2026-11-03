@@ -638,10 +638,10 @@ class NewsAnalyzer:
         _log(f"뉴스 감시 시작: {', '.join(self.watchlist)} | 간격={self.interval}초 "
              f"| 긴급 임계={self.urgent_threshold}")
 
-    def stop(self):
+    def stop(self, timeout: float = 0.25):
         self._running = False
-        if self._thread:
-            self._thread.join(timeout=5)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
 
     def get_events(self) -> list[dict]:
         """대기 중인 이벤트 모두 반환 (메인 루프에서 폴링)"""
@@ -653,8 +653,11 @@ class NewsAnalyzer:
 
     # ── 내부 ──
     def _daemon_loop(self):
-        # 첫 사이클은 살짝 지연 (부팅 직후 부하 분산)
-        time.sleep(5)
+        # 첫 사이클은 살짝 지연 (부팅 직후 부하 분산 — 종료 신호 즉시 반응)
+        for _ in range(20):
+            if not self._running:
+                return
+            time.sleep(0.25)
         while self._running:
             self._check_count += 1
             for ticker in self.watchlist:

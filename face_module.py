@@ -31,8 +31,14 @@ class _LazyFaceRecognition:
 
 face_recognition = _LazyFaceRecognition() if FACE_LIB_AVAILABLE else None
 
-FACES_DIR = Path("faces")
-FACES_DIR.mkdir(exist_ok=True)
+def _faces_dir() -> Path:
+    dd = (os.getenv("JARVIS_DATA_DIR") or "").strip()
+    base = (Path(dd).expanduser() / "faces") if dd else Path("faces")
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+FACES_DIR = _faces_dir()
 # 안전한 저장 포맷 — pickle 역직렬화 RCE 방지 위해 numpy npz 사용 (allow_pickle=False)
 ENCODINGS_FILE = FACES_DIR / "encodings.npz"
 
@@ -88,16 +94,16 @@ class FaceRecognizer:
     def register_face(self, frame, name="Owner"):
         """현재 프레임에서 얼굴을 등록"""
         if not FACE_LIB_AVAILABLE:
-            return {"success": False, "message": "face_recognition 라이브러리가 설치되지 않았습니다."}
+            return {"success": False, "message": "The face_recognition library is not installed."}
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         locations = face_recognition.face_locations(rgb, model="hog")
 
         if not locations:
-            return {"success": False, "message": "화면에서 얼굴을 찾을 수 없습니다. 카메라를 정면으로 바라봐주세요."}
+            return {"success": False, "message": "No face detected in the frame. Please look directly at the camera."}
 
         if len(locations) > 1:
-            return {"success": False, "message": f"화면에 {len(locations)}명이 감지되었습니다. 등록할 사람만 화면에 있어야 합니다."}
+            return {"success": False, "message": f"{len(locations)} faces detected. Only the person being enrolled should be in frame."}
 
         encoding = face_recognition.face_encodings(rgb, locations)[0]
 
@@ -106,11 +112,11 @@ class FaceRecognizer:
             if name in self._known_names:
                 idx = self._known_names.index(name)
                 self._known_encodings[idx] = encoding
-                self._log("OK", f"'{name}' 얼굴 업데이트 완료")
+                self._log("OK", f"'{name}' face updated")
             else:
                 self._known_names.append(name)
                 self._known_encodings.append(encoding)
-                self._log("OK", f"'{name}' 얼굴 등록 완료")
+                self._log("OK", f"'{name}' face enrolled")
 
         # 얼굴 이미지 저장
         top, right, bottom, left = locations[0]
@@ -123,7 +129,7 @@ class FaceRecognizer:
 
         return {
             "success": True,
-            "message": f"'{name}' 얼굴이 성공적으로 등록되었습니다.",
+            "message": f"Face for '{name}' has been enrolled successfully.",
             "registered_count": len(self._known_names),
         }
 
@@ -139,8 +145,8 @@ class FaceRecognizer:
                 img_path = FACES_DIR / f"{name}.jpg"
                 if img_path.exists():
                     img_path.unlink()
-                return {"success": True, "message": f"'{name}' 삭제 완료"}
-            return {"success": False, "message": f"'{name}'이 등록되어 있지 않습니다."}
+                return {"success": True, "message": f"Removed face profile for '{name}'."}
+            return {"success": False, "message": f"'{name}' is not enrolled."}
 
     def list_faces(self):
         """등록된 얼굴 목록"""
@@ -178,10 +184,15 @@ class FaceRecognizer:
                     continue
                 if now - self._warned_unknown > self.UNKNOWN_COOLDOWN:
                     self._warned_unknown = now
+                    try:
+                        from i18n import tr
+                        warn_msg = tr("face_unregistered_warn", user=USER_DISPLAY_NAME)
+                    except Exception:
+                        warn_msg = f"{USER_DISPLAY_NAME}, an unregistered person has been detected. Please be advised."
                     self.events.append({
                         "type": "warn",
                         "name": "Unknown",
-                        "message": f"{USER_DISPLAY_NAME}, an unregistered person has been detected. Please be advised.",
+                        "message": warn_msg,
                     })
                     self._log("FACE", "⚠ Unregistered person detected")
                     break

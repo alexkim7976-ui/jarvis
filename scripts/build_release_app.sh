@@ -144,14 +144,20 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# ── 소스 패키징 (비밀·캐시 제외) ──
+# ── 소스 패키징 (비밀·캐시·개인 데이터 제외) ──
 echo "▶ 소스 복사 → Contents/Resources/app"
 RSYNC_EXCLUDES=(
+  --include '.env.example'
+  --include 'scripts/release.env.example'
   --exclude '.git/'
   --exclude '.venv/'
+  --exclude '.venv-*/'
+  --exclude 'venv/'
   --exclude '__pycache__/'
   --exclude '*.pyc'
+  --exclude '*.pyo'
   --exclude '.env'
+  --exclude '.env.*'
   --exclude '.credentials/'
   --exclude '.certs/'
   --exclude '.logs/'
@@ -170,9 +176,34 @@ RSYNC_EXCLUDES=(
   --exclude 'JARVIS.app/'
   --exclude 'supply-chain-agent/target/'
   --exclude 'portfolio.json'
+  --exclude 'stock_monitor_rules.json'
   --exclude '.jarvis.pid'
   --exclude '.jarvis_link_token'
+  --exclude '.jarvis_path'
   --exclude '.claude/'
+  --exclude '.github/'
+  --exclude '*.log'
+  --exclude 'scripts/build_release_app.sh'
+  --exclude 'scripts/build_jarvis_app.sh'
+  --exclude 'hud_dump/'
+  --exclude 'data/accounts.json'
+  --exclude 'data/interests.json'
+  --exclude 'data/interest_cache.json'
+  --exclude 'data/background_control.json'
+  --exclude 'data/jarvis_memory.db'
+  --exclude 'data/campus_schedule.json'
+  --exclude 'data/sandbox/'
+  --exclude 'data/_account_test/'
+  --exclude 'token.json'
+  --exclude 'credentials.json'
+  --exclude 'campus_token.json'
+  --exclude '*serviceAccount*.json'
+  --exclude '*-firebase-adminsdk-*.json'
+  --exclude '*.pem'
+  --exclude '*.key'
+  --exclude '*.p12'
+  --exclude '*.jks'
+  --exclude 'test.mp3'
 )
 
 if command -v rsync >/dev/null 2>&1; then
@@ -196,19 +227,47 @@ cp "$ROOT/scripts/jarvis_launcher.sh" "$APP_PAYLOAD/scripts/" 2>/dev/null || tru
 # FULL: 개발자 머신 .venv 동봉 (즉시 실행 가능)
 if [[ "$INCLUDE_VENV" == "1" ]]; then
   if [[ -d "$ROOT/.venv" ]]; then
-    echo "▶ .venv 동봉 (용량 큼 — 출시 FULL 패키지)"
-    mkdir -p "$APP_PAYLOAD/.venv_bundle"
-    # Application Support 로 옮기기 쉽게 payload 옆에 두고, 첫 실행 시 복사
-    # 앱 번들 안 Resources/venv 로 넣음
+    echo "▶ .venv 동봉 (슬림 — 시작에 불필요한 패키지 제외)"
+    # Application Support 로 옮기기 쉽게 Resources/venv 에 두고, 첫 실행 시 복사
+    # 시작 시 불필요: jax/jaxlib(mediapipe genai 전용), scipy/sklearn/onnxruntime(openwakeword 전용).
+    # 릴리스 기본 웨이크 엔진은 whisper. 개발용 .venv 는 그대로 둔다.
+    VENV_EXCLUDES=(
+      --exclude '__pycache__/'
+      --exclude '*.pyc'
+      --exclude '*.py[co]'
+      --exclude 'jax/'
+      --exclude 'jaxlib/'
+      --exclude 'jax-*.dist-info/'
+      --exclude 'jaxlib-*.dist-info/'
+      --exclude 'scipy/'
+      --exclude 'scipy.libs/'
+      --exclude 'scipy-*.dist-info/'
+      --exclude 'sklearn/'
+      --exclude 'scikit_learn-*.dist-info/'
+      --exclude 'opt_einsum/'
+      --exclude 'opt_einsum-*.dist-info/'
+      --exclude 'ml_dtypes/'
+      --exclude 'ml_dtypes-*.dist-info/'
+      --exclude 'onnxruntime/'
+      --exclude 'onnxruntime-*.dist-info/'
+    )
     if command -v rsync >/dev/null 2>&1; then
-      rsync -a --delete \
-        --exclude '__pycache__/' \
-        --exclude '*.pyc' \
-        --exclude '*.py[co]' \
-        "$ROOT/.venv/" "$RESOURCES/venv/"
+      rsync -a --delete "${VENV_EXCLUDES[@]}" "$ROOT/.venv/" "$RESOURCES/venv/"
     else
       cp -R "$ROOT/.venv" "$RESOURCES/venv"
+      SITE="$(echo "$RESOURCES/venv"/lib/python*/site-packages)"
+      rm -rf "$SITE/jax" "$SITE/jaxlib" "$SITE/scipy" "$SITE/scipy.libs" "$SITE/sklearn" \
+        "$SITE/opt_einsum" "$SITE/ml_dtypes" "$SITE/onnxruntime"
+      rm -rf "$SITE"/jax-*.dist-info "$SITE"/jaxlib-*.dist-info "$SITE"/scipy-*.dist-info \
+        "$SITE"/scikit_learn-*.dist-info "$SITE"/opt_einsum-*.dist-info \
+        "$SITE"/ml_dtypes-*.dist-info "$SITE"/onnxruntime-*.dist-info
     fi
+    if [[ -f "$RESOURCES/venv/pyvenv.cfg" ]]; then
+      # pyvenv.cfg 의 command 줄에 개발자 홈 절대경로가 들어 있다. 릴리스 복사본에서는 제거.
+      /usr/bin/sed -i '' '/^command = /d' "$RESOURCES/venv/pyvenv.cfg" 2>/dev/null || \
+        sed -i '/^command = /d' "$RESOURCES/venv/pyvenv.cfg"
+    fi
+    printf 'excluded: jax jaxlib scipy sklearn opt_einsum ml_dtypes onnxruntime\n' > "$RESOURCES/venv.slim"
     # 런처가 DATA에 venv 없으면 Resources/venv 를 복사하도록 마커
     printf '1\n' > "$RESOURCES/bundled_venv"
     echo "✓ bundled venv → Resources/venv"
@@ -263,9 +322,82 @@ chmod +x "$RESOURCES/bootstrap_venv.sh"
 # app 쪽 런처 동기화
 cp "$RESOURCES/jarvis_launcher.sh" "$APP_PAYLOAD/scripts/jarvis_launcher.sh" 2>/dev/null || true
 
-# ── 서명·격리 해제 ──
-if command -v codesign >/dev/null 2>&1; then
-  codesign --force --deep --sign - "$APP_DIR" 2>/dev/null || true
+# 개인 데이터·개발자 경로가 번들에 남으면 빌드를 실패시킨다.
+scrub_personal_data() {
+  local root="$1"
+  find "$root" \( \
+      -name '.env' -o -name 'accounts.json' -o -name 'interests.json' \
+      -o -name 'interest_cache.json' -o -name 'jarvis_memory.db' \
+      -o -name 'portfolio.json' -o -name 'stock_monitor_rules.json' \
+      -o -name '.jarvis_link_token' -o -name '.jarvis_path' \
+      -o -name 'campus_token.json' -o -name 'token.json' -o -name 'credentials.json' \
+    \) -print -delete 2>/dev/null || true
+  rm -rf "$root/audio_cache" "$root/faces" "$root/voice_profile" \
+    "$root/.credentials" "$root/.certs" "$root/.logs" \
+    "$root/.venv" "$root/.venv-314-backup" "$root/hud_dump" "$root/.claude" \
+    "$root/data/sandbox" "$root/data/_account_test"
+}
+
+assert_release_clean() {
+  local app="$1"
+  local payload="$app/Contents/Resources/app"
+  local bad=0
+  local hit
+  while IFS= read -r hit; do
+    [[ -z "$hit" ]] && continue
+    echo "✗ 개인 데이터 유출: $hit" >&2
+    bad=1
+  done < <(find "$app" \( \
+      -name '.env' -o -name 'accounts.json' -o -name '.jarvis_link_token' -o -name '.jarvis_path' \
+    \) -print 2>/dev/null)
+  if find "$payload/audio_cache" "$payload/faces" "$payload/voice_profile" -type f 2>/dev/null | grep -q .; then
+    echo "✗ 오디오 캐시 또는 얼굴·음성 샘플이 번들에 있습니다." >&2
+    bad=1
+  fi
+  local hits
+  hits="$(grep -R -l --binary-files=without-match "taehyeonkim" \
+    "$payload" "$app/Contents/Info.plist" "$app/Contents/Resources/venv/pyvenv.cfg" \
+    "$app/Contents/Resources/jarvis_launcher.sh" \
+    --exclude-dir='__pycache__' 2>/dev/null || true)"
+  if [[ -n "$hits" ]]; then
+    echo "✗ 하드코딩된 사용자 경로:" >&2
+    echo "$hits" >&2
+    bad=1
+  fi
+  if [[ "$bad" != 0 ]]; then
+    exit 1
+  fi
+  echo "✓ 번들 개인정보·개발자 경로 검사 통과"
+}
+
+scrub_personal_data "$APP_PAYLOAD"
+assert_release_clean "$APP_DIR"
+
+if [[ "$INCLUDE_VENV" == "1" && -x "$RESOURCES/venv/bin/python" ]]; then
+  echo "▶ 슬림 venv import 확인"
+  "$RESOURCES/venv/bin/python" -c "import cv2, numpy, tkinter, faster_whisper, mediapipe.python.solutions.hands"
+  if "$RESOURCES/venv/bin/python" -c "import jax, scipy, sklearn" 2>/dev/null; then
+    echo "✗ jax/scipy/sklearn 이 릴리스 venv 에 남아 있습니다." >&2
+    exit 1
+  fi
+  echo "✓ 시작 import 가능, jax/scipy/sklearn 제외됨"
+fi
+
+# ── 서명 자격만 확인. Developer ID 가 없으면 서명·공증하지 않는다. ──
+echo "▶ 코드 서명 자격 (security find-identity)"
+security find-identity -v -p codesigning || true
+SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1 || true)"
+if [[ -n "${SIGN_ID}" ]]; then
+  echo "✓ Developer ID 발견 — 서명: $SIGN_ID"
+  codesign --force --deep --options runtime --timestamp --sign "$SIGN_ID" "$APP_DIR"
+else
+  echo "⚠ Developer ID Application 인증서 없음 — 서명과 공증은 하지 않습니다."
+  echo "  인증서 발급 후:"
+  echo "    codesign --force --deep --options runtime --timestamp \\"
+  echo "      --sign \"Developer ID Application: YOUR NAME (TEAMID)\" \"$APP_DIR\""
+  echo "    xcrun notarytool submit \"$DIST/${APP_NAME}-${VERSION}-mac.dmg\" \\"
+  echo "      --apple-id YOU@email.com --team-id TEAMID --password APP_SPECIFIC_PASSWORD --wait"
+  echo "    xcrun stapler staple \"$DIST/${APP_NAME}-${VERSION}-mac.dmg\""
 fi
 xattr -cr "$APP_DIR" 2>/dev/null || true
 
@@ -298,8 +430,8 @@ install_copy() {
   rm -rf "$dest"
   ditto "$APP_DIR" "$dest"
   xattr -cr "$dest" 2>/dev/null || true
-  if command -v codesign >/dev/null 2>&1; then
-    codesign --force --deep --sign - "$dest" 2>/dev/null || true
+  if [[ -n "${SIGN_ID:-}" ]]; then
+    codesign --force --deep --options runtime --timestamp --sign "$SIGN_ID" "$dest"
   fi
   echo "✓ ${label}: ${dest}"
 }

@@ -42,7 +42,11 @@ from stock_quant import (compute_technical_snapshot, _resolve_ticker,
                          resolve_alert_query, suggest_stock_candidates)
 
 # 지정가(목표가) 알림 영속 저장 파일
-_TARGETS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "price_targets.json")
+_DATA_DIR_PA = (os.getenv("JARVIS_DATA_DIR") or "").strip()
+_TARGETS_FILE = os.path.join(
+    os.path.expanduser(_DATA_DIR_PA) if _DATA_DIR_PA else os.path.dirname(os.path.abspath(__file__)),
+    "price_targets.json",
+)
 
 
 # ──────────────────────────────────────────────
@@ -202,10 +206,10 @@ class PriceAlertWorker:
     def start(self):
         self.start_price_alert_worker()
 
-    def stop(self):
+    def stop(self, timeout: float = 0.25):
         self._running = False
-        if self._thread:
-            self._thread.join(timeout=5)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
 
     def get_events(self) -> list[dict]:
         """대기 중인 알림 이벤트 모두 반환 (메인 루프 폴링)"""

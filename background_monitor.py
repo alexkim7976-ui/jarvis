@@ -335,10 +335,10 @@ class BackgroundMonitor:
         if self.playstore_enabled: sources.append(f"PlayStore({PLAY_APP_ID.split('.')[-1]})")
         _log(f"백그라운드 데몬 시작: {' + '.join(sources)}, 간격={MONITOR_INTERVAL}초")
 
-    def stop(self):
+    def stop(self, timeout: float = 0.25):
         self._running = False
-        if self._thread:
-            self._thread.join(timeout=5)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
 
     def get_events(self):
         """대기 중인 이벤트 모두 가져오기"""

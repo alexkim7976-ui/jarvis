@@ -13,15 +13,42 @@ import time
 _speech_sem = threading.Semaphore(1)
 _state_lock = threading.Lock()
 _holders = 0            # 현재 게이트를 점유한(=말하는 중이거나 직전) 발화 수
+_shutting_down = threading.Event()
+
+
+def shutdown_speech_gate() -> None:
+    """앱 종료 시 호출 — 모든 대기/신규 음성 출력을 즉시 차단하고 게이트를 해제한다."""
+    _shutting_down.set()
+    reset_speech_gate()
+
+
+def is_shutting_down() -> bool:
+    return _shutting_down.is_set()
 
 
 def begin_speech(*, wait: bool = True, timeout: float = 180.0) -> bool:
     """음성 출력 시작 — 다른 발화가 끝날 때까지 대기 후 게이트 점유."""
+    if _shutting_down.is_set():
+        return False
     if wait:
-        ok = _speech_sem.acquire(timeout=timeout)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if _shutting_down.is_set():
+                return False
+            if _speech_sem.acquire(timeout=min(0.1, max(0.01, deadline - time.time()))):
+                ok = True
+                break
+        else:
+            ok = False
     else:
         ok = _speech_sem.acquire(blocking=False)
     if ok:
+        if _shutting_down.is_set():
+            try:
+                _speech_sem.release()
+            except ValueError:
+                pass
+            return False
         global _holders
         with _state_lock:
             _holders += 1
@@ -64,6 +91,8 @@ def wait_audio_idle(
     """재생 중인 오디오가 모두 끝날 때까지 대기."""
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if _shutting_down.is_set():
+            return False
         busy = False
         if tts_pipeline is not None and getattr(tts_pipeline, "is_playing", False):
             busy = True

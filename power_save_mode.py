@@ -146,6 +146,7 @@ class PowerSaveFrameReader:
 
     def __init__(self, width: int, height: int):
         from korean_font import put_text
+        from i18n import tr
 
         self._w = max(320, width)
         self._h = max(240, height)
@@ -153,16 +154,16 @@ class PowerSaveFrameReader:
         self._frame[:] = (12, 10, 8)
         put_text(
             self._frame,
-            "Power Save Mode — Webcam OFF",
-            (self._w // 2 - 165, self._h // 2 - 20),
+            tr("powersave_cam_off_title"),
+            (self._w // 2 - 180, self._h // 2 - 20),
             size=22,
             color=(255, 220, 0),
             bold=True,
         )
         put_text(
             self._frame,
-            "Enter / T : Text Command  ·  Z : Exit Power Save",
-            (self._w // 2 - 210, self._h // 2 + 18),
+            tr("powersave_cam_off_sub"),
+            (self._w // 2 - 240, self._h // 2 + 18),
             size=15,
             color=(200, 210, 220),
         )
@@ -170,8 +171,11 @@ class PowerSaveFrameReader:
     def start(self) -> None:
         pass
 
-    def stop(self) -> None:
+    def stop(self, *_args, **_kwargs) -> None:
         pass
+
+    def is_thread_alive(self) -> bool:
+        return False
 
     def read(self, timeout: float = 1.0):
         return True, self._frame.copy()
@@ -187,17 +191,16 @@ def draw_power_save_button(frame, active: bool):
     """HUD Power Save button (Z key toggle)."""
     import cv2
 
-    from korean_font import put_text
+    from korean_font import put_text, blend_rect
+    from i18n import tr
 
     h, w = frame.shape[:2]
-    x, y, bw, bh = 16, 36, 128, 34
-    ov = frame.copy()
-    cv2.rectangle(ov, (x, y), (x + bw, y + bh), _PANEL, -1)
+    x, y, bw, bh = 16, 36, 136, 34
     alpha = 0.88 if active else 0.72
-    cv2.addWeighted(ov, alpha, frame, 1.0 - alpha * 0.85, 0, frame)
+    blend_rect(frame, x, y, x + bw, y + bh, _PANEL, alpha)
     border = _ON if active else _CYAN
     cv2.rectangle(frame, (x, y), (x + bw, y + bh), border, 1, cv2.LINE_AA)
-    label = "PowerSave ON" if active else "Z PowerSave"
+    label = tr("powersave_on_btn") if active else tr("powersave_off_btn")
     put_text(frame, label, (x + 10, y + 23), size=14, color=border, bold=active)
     if active:
         put_text(frame, "Whisper·Cam OFF", (x + bw + 8, y + 23), size=12, color=_DIM)

@@ -13,9 +13,55 @@ import os
 import sys
 import time
 import shutil
+import threading
 import subprocess
 from pathlib import Path
 from datetime import datetime
+
+
+_active_procs_lock = threading.Lock()
+_active_procs: set[subprocess.Popen] = set()
+_tts_shutting_down = threading.Event()
+
+
+def stop_all_local_tts() -> None:
+    """즉시 모든 진행 중인 TTS 합성(jarvis_tts, say) 프로세스를 종료하고 신규 합성을 차단한다."""
+    _tts_shutting_down.set()
+    with _active_procs_lock:
+        procs = list(_active_procs)
+        _active_procs.clear()
+    for p in procs:
+        try:
+            if p.poll() is None:
+                p.terminate()
+                try:
+                    p.wait(timeout=0.15)
+                except Exception:
+                    p.kill()
+        except Exception:
+            pass
+
+
+def _run_tracked_cmd(cmd: list[str], *, timeout: float) -> tuple[int, str]:
+    if _tts_shutting_down.is_set():
+        return -1, "shutting down"
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+    )
+    with _active_procs_lock:
+        _active_procs.add(proc)
+    try:
+        _, stderr = proc.communicate(timeout=timeout)
+        return proc.returncode, stderr or ""
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise
+    finally:
+        with _active_procs_lock:
+            _active_procs.discard(proc)
 
 
 def _log(msg: str) -> None:
@@ -45,20 +91,37 @@ def _av_enabled() -> bool:
 
 
 def _tts_lang() -> str:
-    return (
-        os.getenv("JARVIS_TTS_LANG")
-        or os.getenv("JARVIS_LANG_LOCALE")
-        or "en-GB"
-    ).strip() or "en-GB"
+    explicit = (os.getenv("JARVIS_TTS_LANG") or os.getenv("JARVIS_LANG_LOCALE") or "").strip()
+    if explicit:
+        return explicit
+    try:
+        from i18n import get_lang_meta
+        return str(get_lang_meta()["tts_locale"])
+    except Exception:
+        return "en-GB"
 
 
 def _default_voice() -> str:
-    return (
-        os.getenv("JARVIS_MAC_VOICE")
-        or os.getenv("JARVIS_VOICE")
-        or os.getenv("TTS_VOICE")
-        or "Daniel"
-    ).strip() or "Daniel"
+    explicit = (os.getenv("JARVIS_MAC_VOICE") or os.getenv("JARVIS_VOICE") or os.getenv("TTS_VOICE") or "").strip()
+    if explicit:
+        return explicit
+    try:
+        from i18n import get_lang_meta
+        return str(get_lang_meta()["tts_voice"])
+    except Exception:
+        return "Daniel"
+
+
+def _fallback_voices(primary: str) -> list[str]:
+    out = [primary]
+    try:
+        from i18n import get_lang_meta
+        for v in get_lang_meta().get("tts_fallbacks") or []:
+            if v and v not in out:
+                out.append(v)
+    except Exception:
+        pass
+    return out
 
 
 def _cache_dir() -> Path:
@@ -185,6 +248,8 @@ def _av_rate() -> str | None:
 
 
 def _synth_av(text: str, out_path: Path, voice: str) -> str | None:
+    if _tts_shutting_down.is_set():
+        return None
     binp = _resolve_swift_bin()
     if not binp:
         return None
@@ -194,15 +259,16 @@ def _synth_av(text: str, out_path: Path, voice: str) -> str | None:
         cmd += ["--rate", rate]
     cmd += ["--text", text.strip()]
     try:
-        r = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=float(os.getenv("JARVIS_SAY_TIMEOUT", "45")),
+        rc, stderr = _run_tracked_cmd(
+            cmd, timeout=float(os.getenv("JARVIS_SAY_TIMEOUT", "45")),
         )
-        if r.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
+        if rc == 0 and out_path.exists() and out_path.stat().st_size > 0:
             return str(out_path)
+        if _tts_shutting_down.is_set():
+            return None
         # 헬퍼 실패 → say 폴백
-        if (r.stderr or "").strip():
-            _log(f"AVSpeech fallback to say: {(r.stderr or '').strip()[:100]}")
+        if stderr.strip():
+            _log(f"AVSpeech fallback to say: {stderr.strip()[:100]}")
         return None
     except subprocess.TimeoutExpired:
         _log("AVSpeech synthesis timed out -> falling back to say")
@@ -213,30 +279,40 @@ def _synth_av(text: str, out_path: Path, voice: str) -> str | None:
 
 
 def _synth_say(text: str, out_path: Path, voice: str) -> str | None:
+    if _tts_shutting_down.is_set():
+        return None
     if not macos_tts_available():
         _log("macOS say command is not available.")
         return None
     rate = os.getenv("JARVIS_MAC_SAY_RATE", "auto").strip().lower()
-    cmd = ["say", "-v", voice, "-o", str(out_path), text.strip()]
-    if rate and rate not in ("auto", "natural", "default") and rate.isdigit():
-        cmd = ["say", "-v", voice, "-r", rate, "-o", str(out_path), text.strip()]
+    timeout_sec = float(os.getenv("JARVIS_SAY_TIMEOUT", "45"))
+
+    for cand_voice in _fallback_voices(voice):
+        if _tts_shutting_down.is_set():
+            return None
+        cmd = ["say", "-v", cand_voice, "-o", str(out_path), text.strip()]
+        if rate and rate not in ("auto", "natural", "default") and rate.isdigit():
+            cmd = ["say", "-v", cand_voice, "-r", rate, "-o", str(out_path), text.strip()]
+        try:
+            rc, stderr = _run_tracked_cmd(cmd, timeout=timeout_sec)
+            if rc == 0 and out_path.exists() and out_path.stat().st_size > 0:
+                return str(out_path)
+        except subprocess.TimeoutExpired:
+            _log("say timed out")
+            return None
+        except Exception:
+            continue
+
+    # 최후 폴백: 시스템 기본 음성 (보이스 미지정)
     try:
-        subprocess.run(cmd, check=True, capture_output=True,
-                       timeout=float(os.getenv("JARVIS_SAY_TIMEOUT", "45")))
-        if out_path.exists() and out_path.stat().st_size > 0:
+        rc, stderr = _run_tracked_cmd(["say", "-o", str(out_path), text.strip()], timeout=timeout_sec)
+        if rc == 0 and out_path.exists() and out_path.stat().st_size > 0:
             return str(out_path)
-        _log("say output file is empty.")
-        return None
-    except subprocess.TimeoutExpired:
-        _log("say timed out")
-        return None
-    except subprocess.CalledProcessError as e:
-        err = (e.stderr or b"").decode(errors="replace")[:120]
-        _log(f"say error: {err}")
-        return None
+        if not _tts_shutting_down.is_set():
+            _log(f"say error (rc={rc}): {stderr[:120]}")
     except Exception as e:
         _log(f"synthesis error: {e}")
-        return None
+    return None
 
 
 def synthesize_macos(
@@ -246,7 +322,7 @@ def synthesize_macos(
 ) -> str | None:
     """Synthesize speech to an audio file using macOS English voice.
     1st choice: AVSpeechSynthesizer helper -> fallback: macOS `say`."""
-    if not text or not text.strip():
+    if not text or not text.strip() or _tts_shutting_down.is_set():
         return None
 
     out_dir = audio_dir or Path(os.getenv("AUDIO_SAVE_DIR", "audio_cache"))

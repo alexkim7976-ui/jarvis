@@ -57,7 +57,9 @@ SOCIAL_SUBREDDITS = [s.strip() for s in os.getenv(
 ).split(",") if s.strip()]
 SOCIAL_CHECK_INTERVAL = int(os.getenv("SOCIAL_CHECK_INTERVAL", "600"))
 SOCIAL_SPIKE_THRESHOLD = float(os.getenv("SOCIAL_SPIKE_THRESHOLD", "5.0"))
-SOCIAL_BASELINE_FILE = Path(os.getenv("SOCIAL_BASELINE_FILE", "social_baseline.json"))
+_DATA_DIR_SD = (os.getenv("JARVIS_DATA_DIR") or "").strip()
+_RAW_SB_FILE = Path(os.getenv("SOCIAL_BASELINE_FILE", "social_baseline.json"))
+SOCIAL_BASELINE_FILE = (Path(_DATA_DIR_SD).expanduser() / _RAW_SB_FILE) if (_DATA_DIR_SD and not _RAW_SB_FILE.is_absolute()) else _RAW_SB_FILE
 REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "JARVIS social detector")
 
 COMMON_WORDS = {
@@ -362,10 +364,10 @@ class SocialSpikeDetector:
         self._thread.start()
         _log(f"감시 시작: {', '.join(self.subreddits)} | 간격={self.interval}초")
 
-    def stop(self):
+    def stop(self, timeout: float = 0.25):
         self._running = False
-        if self._thread:
-            self._thread.join(timeout=5)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
 
     def get_events(self):
         out = []
@@ -380,7 +382,10 @@ class SocialSpikeDetector:
                 self._event_q.appendleft(evt)
 
     def _loop(self):
-        time.sleep(15)
+        for _ in range(60):
+            if not self._running:
+                return
+            time.sleep(0.25)
         while self._running:
             self._check_count += 1
             try:

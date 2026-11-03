@@ -84,6 +84,12 @@ export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$CACHE_DIR}"
 export AUDIO_SAVE_DIR="${AUDIO_SAVE_DIR:-$DATA_ROOT/audio_cache}"
 export CFBundleIdentifier="${CFBundleIdentifier:-com.jarvis.assistant}"
 export __CFBundleIdentifier="${CFBundleIdentifier:-com.jarvis.assistant}"
+# 디버그·타이밍 로그는 환경변수로만 켠다. 릴리스 기본값은 꺼짐.
+export JARVIS_DEBUG="${JARVIS_DEBUG:-0}"
+export JARVIS_TIMING_LOG="${JARVIS_TIMING_LOG:-0}"
+export GLOG_minloglevel="${GLOG_minloglevel:-2}"
+export ABSL_MIN_LOG_LEVEL="${ABSL_MIN_LOG_LEVEL:-2}"
+export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-3}"
 
 # 출시 모드: 코드 트리에 쓰기 가능한 경로 심볼릭 링크
 if [[ "$RELEASE_MODE" == "1" ]]; then
@@ -106,6 +112,8 @@ if [[ "$RELEASE_MODE" == "1" ]]; then
 fi
 
 log_line() {
+  # 상세 런처 로그는 JARVIS_DEBUG=1 일 때만 파일에 남긴다.
+  [[ "${JARVIS_DEBUG:-0}" == "1" ]] || return 0
   echo "$1" >> "$LOGFILE"
 }
 
@@ -387,4 +395,8 @@ fi
 
 log_line "exec: $PY $MAIN"
 cd "$CODE_ROOT" || exit 1
-exec -a "J.A.R.V.I.S" "$PY" "$MAIN" >> "$LOGFILE" 2>&1
+# 릴리스 기본: stdout 디버그 로그는 남기지 않는다. JARVIS_DEBUG=1 일 때만 전체 로그.
+if [[ "${JARVIS_DEBUG:-0}" == "1" ]]; then
+  exec -a "J.A.R.V.I.S" "$PY" "$MAIN" >> "$LOGFILE" 2>&1
+fi
+exec -a "J.A.R.V.I.S" "$PY" "$MAIN" 2>> "$LOGFILE" >/dev/null

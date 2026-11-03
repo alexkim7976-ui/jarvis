@@ -9,7 +9,7 @@ from __future__ import annotations
 import cv2
 
 from hangul_input import HangulComposer
-from korean_font import put_text
+from korean_font import put_text, blend_rect
 
 _PANEL = (15, 12, 8)
 _CYAN = (255, 220, 0)
@@ -67,12 +67,11 @@ class ScreenKeyboard:
 
     def draw(self, frame):
         """Draw bottom input hint when idle, or command input bar when active."""
+        from i18n import get_lang_meta, tr
         h, w = frame.shape[:2]
         if self.active:
             top = h - 112
-            ov = frame.copy()
-            cv2.rectangle(ov, (0, top), (w, h - 62), _PANEL, -1)
-            cv2.addWeighted(ov, 0.82, frame, 0.18, 0, frame)
+            blend_rect(frame, 0, top, w, h - 62, _PANEL, 0.82)
             cv2.rectangle(frame, (8, top + 4), (w - 8, h - 66), _CYAN, 1, cv2.LINE_AA)
             mode = "KO" if self.hangul else "EN"
             put_text(frame, f"⌨ {mode}", (16, top + 30), size=16, color=_CYAN, bold=True)
@@ -80,15 +79,16 @@ class ScreenKeyboard:
             if len(shown) > 32:
                 shown = "…" + shown[-32:]
             color = _GREEN if self.buffer() else _DIM
-            put_text(frame, (shown or "Type a command") + "_", (100, top + 30), size=18, color=color)
+            put_text(frame, (shown or tr("kb_placeholder")) + "_", (100, top + 30), size=18, color=color)
             put_text(
-                frame, "Tab EN/KO · Enter Send · Esc Cancel",
+                frame, tr("kb_active_hint"),
                 (16, top + 48), size=13, color=_DIM,
             )
             return frame
 
+        lang_lbl = get_lang_meta()["label"]
         put_text(
-            frame, "Enter: Type Command  ·  Hold Index=Talk  ·  Hold V=Send",
+            frame, tr("kb_idle_hint", lang=lang_lbl),
             (16, h - 78), size=13, color=_DIM,
         )
         return frame

@@ -16,7 +16,8 @@ _thread: threading.Thread | None = None
 
 
 def data_dir() -> Path:
-    root = Path(os.getenv("JARVIS_PROJECT_ROOT") or Path(__file__).resolve().parent)
+    dd = (os.getenv("JARVIS_DATA_DIR") or "").strip()
+    root = Path(dd).expanduser() if dd else Path(os.getenv("JARVIS_PROJECT_ROOT") or Path(__file__).resolve().parent)
     folder = root / "data"
     folder.mkdir(parents=True, exist_ok=True)
     return folder

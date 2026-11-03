@@ -13,7 +13,7 @@ from interest_prefetch import (
     list_interests,
     remove_interest,
 )
-from korean_font import put_text
+from korean_font import put_text, blend_rect
 
 TASKS = (
     ("prefetch", "Interest Prefetch"),
@@ -168,42 +168,43 @@ def interpret_control_command(text: str) -> str | None:
     if not raw:
         return None
 
-    added = re.search(r"관심\s*(?:주제\s*)?(?:추가|등록)\s+(.+)", raw)
+    added = re.search(r"(?:관심\s*(?:주제\s*)?(?:추가|등록)|add\s+interest(?:\s+topic)?)\s+(.+)", raw, re.I)
     if added:
         return add_interest(_clean_topic(added.group(1)))
-    removed = re.search(r"관심\s*(?:주제\s*)?(?:삭제|제거|빼)\s+(.+)", raw)
+    removed = re.search(r"(?:관심\s*(?:주제\s*)?(?:삭제|제거|빼)|remove\s+interest(?:\s+topic)?)\s+(.+)", raw, re.I)
     if removed:
         return remove_interest(_clean_topic(removed.group(1)))
-    if re.search(r"관심\s*(?:주제\s*)?(?:목록|보여|뭐)", raw) or raw in ("관심", "관심 목록"):
+    if re.search(r"(?:관심\s*(?:주제\s*)?(?:목록|보여|뭐)|list\s+interests|show\s+interests)", raw, re.I) or raw.lower() in ("관심", "관심 목록", "interests"):
         topics = list_interests()
-        listed = ", ".join(topics) if topics else "없습니다"
-        return f"관심 주제는 {listed}. 추가하려면 관심 추가와 주제를 말하세요."
+        listed = ", ".join(topics) if topics else "none"
+        return f"Current interest topics: {listed}. Say 'Add interest <topic>' to add one."
 
-    if re.search(r"백그라운드\s*(?:전부|모두|전체)\s*(?:꺼|끄|중지|멈춰|정지)", raw):
+    if re.search(r"(?:백그라운드\s*(?:전부|모두|전체)\s*(?:꺼|끄|중지|멈춰|정지)|turn\s+off\s+all\s+background|stop\s+all\s+background)", raw, re.I):
         return set_all(False)
-    if re.search(r"백그라운드\s*(?:전부|모두|전체)\s*(?:켜|시작)", raw):
+    if re.search(r"(?:백그라운드\s*(?:전부|모두|전체)\s*(?:켜|시작)|turn\s+on\s+all\s+background|start\s+all\s+background)", raw, re.I):
         return set_all(True)
-    if re.fullmatch(r"백그라운드(?:\s*(?:목록|상태|보여\s*줘|보여|뭐|확인))?", raw):
+    if re.fullmatch(r"(?:백그라운드(?:\s*(?:목록|상태|보여\s*줘|보여|뭐|확인))?|background(?:\s+(?:tasks|status|list))?)", raw, re.I):
         return summary()
 
-    if "백그라운드" not in raw:
+    if "백그라운드" not in raw and "background" not in raw.lower():
         return None
     key = _match_task(raw)
     if not key:
-        if re.search(r"(?:목록|상태|보여|뭐|확인)", raw):
+        if re.search(r"(?:목록|상태|보여|뭐|확인|status|list|show)", raw, re.I):
             return summary()
         return None
-    if re.search(r"(?:꺼|끄|중지|멈춰|정지)", raw):
+    if re.search(r"(?:꺼|끄|중지|멈춰|정지|off|disable|stop)", raw, re.I):
         return set_enabled(key, False)
-    if re.search(r"(?:켜|시작)", raw):
+    if re.search(r"(?:켜|시작|on|enable|start)", raw, re.I):
         return set_enabled(key, True)
     return summary()
 
 
 def draw_background_panel(frame, visible: bool):
+    from i18n import tr
     h, w = frame.shape[:2]
     if not visible:
-        put_text(frame, "B  Background", (min(280, max(16, w - 220)), 36), size=14, color=_DIM)
+        put_text(frame, tr("bg_button"), (min(280, max(16, w - 220)), 36), size=14, color=_DIM)
         return frame
 
     rows, topics = status_rows()
@@ -212,11 +213,9 @@ def draw_background_panel(frame, visible: bool):
         x = 16
     pw = min(300, w - x - 12)
     ph = min(78 + 22 * len(rows) + 46, h - y - 80)
-    ov = frame.copy()
-    cv2.rectangle(ov, (x, y), (x + pw, y + ph), _PANEL, -1)
-    cv2.addWeighted(ov, 0.86, frame, 0.14, 0, frame)
+    blend_rect(frame, x, y, x + pw, y + ph, _PANEL, 0.86)
     cv2.rectangle(frame, (x, y), (x + pw, y + ph), _CYAN, 1, cv2.LINE_AA)
-    put_text(frame, "Background Tasks", (x + 14, y + 26), size=17, color=_CYAN, bold=True)
+    put_text(frame, tr("bg_title"), (x + 14, y + 26), size=17, color=_CYAN, bold=True)
     line_y = y + 50
     for label, state in rows:
         color = _OFF if state in ("OFF", "꺼짐") else _ON

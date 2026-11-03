@@ -79,12 +79,18 @@ def _tools_supported_heuristic(model: str) -> bool:
     return any(k in m for k in ("gemma4", "gemma2", "qwen", "llama3", "llama3.1", "llama3.2", "nemotron", "mistral"))
 
 
+_tool_probe_cache: dict[str, bool] = {}
+
+
 def model_supports_tools(model: str | None = None, *, probe: bool = True) -> bool:
-    """Ollama 모델 tools 지원 여부 (gemma3 등 미지원 모델 방지)."""
+    """Ollama 모델 tools 지원 여부 (gemma3 등 미지원 모델 방지, 모델별 1회만 확인/기본 휴리스틱 우선)."""
     name = model or OLLAMA_MODEL
     if not _tools_supported_heuristic(name):
         return False
-    if not probe or os.getenv("JARVIS_SKIP_TOOL_PROBE", "").strip().lower() in ("1", "true", "yes"):
+    if name in _tool_probe_cache:
+        return _tool_probe_cache[name]
+    if not probe or os.getenv("JARVIS_SKIP_TOOL_PROBE", "1").strip().lower() in ("1", "true", "yes"):
+        _tool_probe_cache[name] = True
         return True
     timeout = float(os.getenv("OLLAMA_TOOL_PROBE_TIMEOUT", "8"))
     try:
@@ -102,12 +108,14 @@ def model_supports_tools(model: str | None = None, *, probe: bool = True) -> boo
             },
             timeout=timeout,
         )
-        if r.status_code != 200:
-            return False
-        return "does not support tools" not in (r.text or "").lower()
+        ok = r.status_code == 200 and "does not support tools" not in (r.text or "").lower()
+        _tool_probe_cache[name] = ok
+        return ok
     except Exception:
         # 첫 로드·GPU 대기 등으로 타임아웃 — 휴리스틱으로 진행 (시작 막지 않음)
-        return _tools_supported_heuristic(name)
+        res = _tools_supported_heuristic(name)
+        _tool_probe_cache[name] = res
+        return res
 
 
 def _ollama_options() -> dict:
@@ -153,9 +161,11 @@ def chat_with_tools(
     log_fn: Callable[[str, str], None] | None = None,
 ) -> str:
     """
-    Ollama 로컬 LLM + function calling 루프.
-    execute_tool(name, args) → 도구 결과 dict.
+    Ollama 로컬 LLM + function calling 루프 (실시간 스트리밍 지원).
+    첫 문장이 생성되는 즉시 pipeline.feed()로 TTS 합성을 시작하여 체감 응답 지연을 대폭 줄인다.
     """
+    import time as _time
+
     win = get_context_window(history) if get_context_window else (history or [])
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     for m in win:
@@ -167,48 +177,88 @@ def chat_with_tools(
         pipeline.start()
 
     final_text = ""
+    fed_any = False
     for i in range(max_iters):
+        t_req = _time.perf_counter()
+        t_first_tok = None
         payload = {
             "model": OLLAMA_MODEL,
             "messages": messages,
             "tools": tools,
-            "stream": False,
+            "stream": True,
             "options": _ollama_options(),
         }
+        content_parts: list[str] = []
+        raw_tool_calls: list[dict] = []
         try:
             r = requests.post(
                 f"{OLLAMA_URL}/api/chat",
                 json=payload,
+                stream=True,
                 timeout=OLLAMA_TIMEOUT,
             )
             r.raise_for_status()
-            data = r.json()
+            for raw_line in r.iter_lines():
+                if not raw_line:
+                    continue
+                try:
+                    chunk = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                msg_chunk = chunk.get("message") or {}
+                tcs = msg_chunk.get("tool_calls")
+                if tcs:
+                    raw_tool_calls.extend(tcs)
+                tok = msg_chunk.get("content") or ""
+                if tok:
+                    if t_first_tok is None:
+                        t_first_tok = _time.perf_counter()
+                        if log_fn and os.getenv("JARVIS_TIMING_LOG", "0").strip().lower() in ("1", "true", "yes", "on"):
+                            log_fn("INFO", f"⚡ [Timing] LLM first token in {(t_first_tok - t_req)*1000:.0f}ms")
+                    content_parts.append(tok)
+                    # 도구 호출이 없는 일반 응답이면 토큰 도착 즉시 TTS 파이프라인에 스트리밍
+                    if pipeline and not raw_tool_calls:
+                        for ch in tok:
+                            pipeline.feed(ch)
+                        fed_any = True
         except Exception as e:
             if final_text:
+                if pipeline:
+                    pipeline.finish()
                 return final_text
             if log_fn:
                 log_fn("WARN", f"Ollama call failed -> falling back to offline: {e}")
             try:
                 from runtime_backtrack import ollama_failure_reply
-                return ollama_failure_reply(user_text, e)
+                ans = ollama_failure_reply(user_text, e)
             except Exception:
-                return f"I apologize, {USER_DISPLAY_NAME}. Failed to connect to the local AI engine."
+                ans = f"I apologize, {USER_DISPLAY_NAME}. Failed to connect to the local AI engine."
+            if pipeline and ans:
+                for ch in ans:
+                    pipeline.feed(ch)
+                pipeline.finish()
+            return ans
 
-        msg = data.get("message") or {}
-        content = (msg.get("content") or "").strip()
-        tool_calls = _normalize_tool_calls(msg)
+        content = "".join(content_parts).strip()
+        tool_calls = _normalize_tool_calls({"tool_calls": raw_tool_calls})
 
         if not tool_calls:
             final_text = content or final_text
             break
 
-        messages.append(msg)
+        assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
+        if raw_tool_calls:
+            assistant_msg["tool_calls"] = raw_tool_calls
+        messages.append(assistant_msg)
         for tc in tool_calls:
             name = tc["name"]
             args = tc["arguments"]
             if log_fn:
                 log_fn("TOOL", f"[Ollama] {name}({json.dumps(args, ensure_ascii=False)[:80]})")
+            t_tool = _time.perf_counter()
             result = execute_tool(name, args)
+            if log_fn and os.getenv("JARVIS_TIMING_LOG", "0").strip().lower() in ("1", "true", "yes", "on"):
+                log_fn("INFO", f"⚡ [Timing] Tool {name} finished in {(_time.perf_counter() - t_tool)*1000:.0f}ms")
             messages.append({
                 "role": "tool",
                 "content": json.dumps(result, ensure_ascii=False)[:8000],
@@ -221,30 +271,52 @@ def chat_with_tools(
             final_text = f"I processed your request, {USER_DISPLAY_NAME}, but could not generate a spoken response."
 
     if not final_text and messages:
-        # 도구 결과만 있고 모델 텍스트 없음 → 한 줄 요약 재요청
+        # 도구 결과만 있고 모델 텍스트 없음 → 선택된 언어로 한 줄 요약 스트리밍 재요청
+        try:
+            from i18n import get_lang_meta
+            _lang_name = get_lang_meta()["llm_language"]
+        except Exception:
+            _lang_name = "English"
         try:
             messages.append({
                 "role": "user",
-                "content": "Summarize the tool result above in 2 concise English sentences suitable for voice playback.",
+                "content": f"Summarize the tool result above in 2 concise {_lang_name} sentences suitable for voice playback.",
             })
             r = requests.post(
                 f"{OLLAMA_URL}/api/chat",
                 json={
                     "model": OLLAMA_MODEL,
                     "messages": messages,
-                    "stream": False,
+                    "stream": True,
                     "options": _ollama_options(),
                 },
+                stream=True,
                 timeout=OLLAMA_TIMEOUT,
             )
             r.raise_for_status()
-            final_text = (r.json().get("message", {}) or {}).get("content", "").strip()
+            summary_parts: list[str] = []
+            for raw_line in r.iter_lines():
+                if not raw_line:
+                    continue
+                try:
+                    chunk = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                tok = (chunk.get("message") or {}).get("content") or ""
+                if tok:
+                    summary_parts.append(tok)
+                    if pipeline:
+                        for ch in tok:
+                            pipeline.feed(ch)
+                        fed_any = True
+            final_text = "".join(summary_parts).strip()
         except Exception:
             pass
 
-    if pipeline and final_text:
-        for ch in final_text:
-            pipeline.feed(ch)
+    if pipeline:
+        if final_text and not fed_any:
+            for ch in final_text:
+                pipeline.feed(ch)
         pipeline.finish()
 
     return final_text

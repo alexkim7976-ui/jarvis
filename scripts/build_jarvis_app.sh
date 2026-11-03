@@ -43,25 +43,40 @@ bundle_release_app() {
   mkdir -p "$dest"
   echo "▶ Resources/app 에 출시 코드 복사…"
   rsync -a --delete \
+    --include '.env.example' \
+    --include 'scripts/release.env.example' \
     --exclude '.git/' \
     --exclude '.venv/' \
+    --exclude '.venv-*/' \
     --exclude 'venv/' \
     --exclude '__pycache__/' \
     --exclude '*.pyc' \
     --exclude '.env' \
     --exclude '.env.*' \
-    --exclude 'scripts/release.env.example' \
     --exclude 'audio_cache/' \
     --exclude '.logs/' \
+    --exclude '.credentials/' \
+    --exclude '.certs/' \
     --exclude '.cache/' \
     --exclude 'JARVIS.app/' \
+    --exclude 'dist/' \
     --exclude 'target/' \
     --exclude '.idea/' \
+    --exclude '.claude/' \
     --exclude '.DS_Store' \
     --exclude 'faces/' \
     --exclude 'voice_profile/' \
+    --exclude 'hud_dump/' \
     --exclude 'portfolio.json' \
+    --exclude 'stock_monitor_rules.json' \
+    --exclude '.jarvis_link_token' \
+    --exclude '.jarvis_path' \
+    --exclude 'data/accounts.json' \
+    --exclude 'data/interests.json' \
+    --exclude 'data/interest_cache.json' \
     --exclude 'data/jarvis_memory.db' \
+    --exclude 'data/campus_schedule.json' \
+    --exclude 'data/sandbox/' \
     "$ROOT/" "$dest/"
   # release template 은 반드시 포함
   mkdir -p "$dest/scripts"
@@ -154,8 +169,6 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <string>실행 중 JARVIS 창을 앞으로 가져오기 위해 자동화 권한이 필요합니다.</string>
   <key>LSEnvironment</key>
   <dict>
-    <key>MPLCONFIGDIR</key>
-    <string>REPLACE_MPLCONFIGDIR</string>
     <key>JARVIS_APP_LAUNCH</key>
     <string>1</string>
   </dict>
@@ -163,9 +176,8 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Info.plist 경로 치환 (공백 포함 프로젝트 경로)
-/usr/bin/sed -i '' "s|REPLACE_MPLCONFIGDIR|${ROOT}/.matplotlib|g" "$CONTENTS/Info.plist" 2>/dev/null || \
-  sed -i "s|REPLACE_MPLCONFIGDIR|${ROOT}/.matplotlib|g" "$CONTENTS/Info.plist"
+# MPLCONFIGDIR 는 런처가 실행 시 데이터 폴더로 설정한다.
+# Info.plist 에 개발자 절대경로를 넣지 않는다.
 
 chmod +x "$ROOT/scripts/jarvis_launcher.sh"
 
@@ -195,9 +207,10 @@ if [[ -f "$ROOT/assets/AppIcon.icns" ]]; then
   cp "$ROOT/assets/AppIcon.icns" "$RESOURCES/AppIcon.icns"
 fi
 
-# Gatekeeper 격리 완화 + ad-hoc 서명
-if command -v codesign >/dev/null 2>&1; then
-  codesign --force --deep --sign - "$APP_DIR" 2>/dev/null || true
+# Developer ID 가 있을 때만 서명. 없으면 ad-hoc 서명도 하지 않는다.
+SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1 || true)"
+if [[ -n "${SIGN_ID}" ]]; then
+  codesign --force --deep --options runtime --timestamp --sign "$SIGN_ID" "$APP_DIR"
 fi
 xattr -cr "$APP_DIR" 2>/dev/null || true
 
@@ -209,8 +222,8 @@ install_copy() {
   rm -rf "$dest"
   ditto "$APP_DIR" "$dest"
   xattr -cr "$dest" 2>/dev/null || true
-  if command -v codesign >/dev/null 2>&1; then
-    codesign --force --deep --sign - "$dest" 2>/dev/null || true
+  if [[ -n "${SIGN_ID:-}" ]]; then
+    codesign --force --deep --options runtime --timestamp --sign "$SIGN_ID" "$dest"
   fi
   echo "✓ ${label}: ${dest}"
 }

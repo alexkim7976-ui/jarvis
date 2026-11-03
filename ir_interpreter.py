@@ -155,14 +155,14 @@ class IRInterpreter:
             "briefing": f"{USER_DISPLAY_NAME}, {self.company} 실시간 IR 통역을 시작했습니다.",
         }
 
-    def stop(self) -> dict:
+    def stop(self, timeout: float = 0.3) -> dict:
         self._running = False
         self._terminate_processes()
-        if self._stream_thread:
-            self._stream_thread.join(timeout=3)
-        if self._summary_thread:
-            self._summary_thread.join(timeout=3)
-        return {"success": True, "message": "IR 통역을 중지했습니다.", "briefing": f"IR 통역을 중지했습니다, {USER_DISPLAY_NAME}."}
+        if self._stream_thread and self._stream_thread.is_alive():
+            self._stream_thread.join(timeout=timeout)
+        if self._summary_thread and self._summary_thread.is_alive():
+            self._summary_thread.join(timeout=timeout)
+        return {"success": True, "message": "IR interpreter stopped.", "briefing": f"IR interpreter stopped, {USER_DISPLAY_NAME}."}
 
     def get_events(self):
         events = []

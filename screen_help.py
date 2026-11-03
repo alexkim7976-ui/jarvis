@@ -5,7 +5,7 @@ import time
 
 import cv2
 
-from korean_font import put_text, wrap_text
+from korean_font import put_text, wrap_text, blend_rect
 
 _PANEL = (15, 12, 8)
 _CYAN = (255, 220, 0)
@@ -155,6 +155,7 @@ def draw_help(
     has_answer: bool = False,
     hands_enabled: bool = False,
 ):
+    from i18n import get_lang_meta, tr
     h, w = frame.shape[:2]
     now = time.monotonic()
     dt = now - _SMOOTH["t"] if _SMOOTH["t"] else 1 / 60.0
@@ -165,7 +166,7 @@ def draw_help(
     _SMOOTH["open"] = _lerp(_SMOOTH["open"], target_open, ease)
 
     if not visible and _SMOOTH["open"] < 0.04:
-        put_text(frame, "H  Help", (w - 110, 36), size=14, color=_DIM)
+        put_text(frame, tr("help_button"), (w - 110, 36), size=14, color=_DIM)
         return frame
 
     busy = (
@@ -189,21 +190,17 @@ def draw_help(
     x, y = int(_SMOOTH["x"]), int(_SMOOTH["y"])
 
     alpha_panel = 0.78 * _SMOOTH["open"]
-    if hands_enabled:
-        body = _HELP_COMPACT_HANDS if compact else _HELP_HANDS
-    else:
-        body = _HELP_COMPACT if compact else _HELP
+    lang_lbl = get_lang_meta()["label"]
+    body = tr("help_compact", lang=lang_lbl) if compact else tr("help_body", lang=lang_lbl)
     lines = wrap_text(body, pw - 28, font)
     line_h = font + 7
     used_h = min(ph, len(lines) * line_h + 44)
     ph = used_h
 
-    ov = frame.copy()
-    cv2.rectangle(ov, (x, y), (x + pw, y + ph), _PANEL, -1)
-    cv2.addWeighted(ov, alpha_panel, frame, 1.0 - alpha_panel * 0.85, 0, frame)
+    blend_rect(frame, x, y, x + pw, y + ph, _PANEL, alpha_panel)
     cv2.rectangle(frame, (x, y), (x + pw, y + ph), _CYAN, 1, cv2.LINE_AA)
 
-    title = "Controls & Help" + (" · Summary" if compact else "")
+    title = tr("help_title") + (tr("help_summary_suffix") if compact else "")
     put_text(frame, title, (x + 14, y + 26), size=15 if compact else 17,
              color=_CYAN, bold=True)
     ly = y + 48
@@ -215,5 +212,5 @@ def draw_help(
         ly += line_h
 
     if compact and _SMOOTH["open"] > 0.5:
-        put_text(frame, "H Close", (x + pw - 68, y + ph - 6), size=10, color=_DIM)
+        put_text(frame, tr("help_close"), (x + pw - 74, y + ph - 6), size=10, color=_DIM)
     return frame

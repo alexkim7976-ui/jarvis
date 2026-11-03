@@ -10,9 +10,9 @@ from voice_profile import VoiceProfile
 WAKE_WORD_ENABLED  = os.getenv("WAKE_WORD_ENABLED","true").lower()=="true"
 WAKE_WORDS_STR     = os.getenv(
     "WAKE_WORDS",
-    "자비스야,자비스,jarvis,hey jarvis,쟈비스,자바스,저비스",
+    "jarvis,hey jarvis,자비스야,자비스,쟈비스,자바스,저비스,贾维斯,你好贾维斯,ジャービス,ねえジャービス,oye jarvis",
 )
-WAKE_WORDS         = [w.strip().lower() for w in WAKE_WORDS_STR.split(",")]
+WAKE_WORDS         = [w.strip().lower() for w in WAKE_WORDS_STR.split(",") if w.strip()]
 WAKE_THRESHOLD     = int(os.getenv("WAKE_WORD_THRESHOLD","600"))
 WAKE_COOLDOWN      = float(os.getenv("WAKE_WORD_COOLDOWN","3.0"))
 WAKE_CLIP_DURATION = 1.2    # 클립 최대 길이(초) — 보통 침묵 감지로 더 일찍 종료됨
@@ -78,15 +78,23 @@ class WakeWordDetector:
             except ImportError:
                 _log("WARN", "Voice profile untrained — anyone can wake (press V to train)")
 
-    def stop(self):
+    def stop(self, timeout: float = 0.4):
         self._running=False; self.listening=False; self.status="OFF"
-        if self._thread: self._thread.join(timeout=3)
-        self._release_stream()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+        self._release_stream(timeout=0.2)
 
-    def _release_stream(self):
+    def _release_stream(self, timeout: float | None = None):
         """CoreAudio 입력 장치 점유 해제 — 녹음/TTS와 동시 오픈 시 macOS UI 프리징 방지.
         _stream_lock으로 in-flight read()가 끝날 때까지 대기 후 close → ring buffer use-after-free(SIGSEGV) 방지."""
-        with self._stream_lock:
+        acquired = (
+            self._stream_lock.acquire(timeout=timeout)
+            if timeout is not None
+            else self._stream_lock.acquire()
+        )
+        if not acquired:
+            return
+        try:
             if self._stream:
                 try:
                     self._stream.stop_stream()
@@ -94,6 +102,8 @@ class WakeWordDetector:
                 except Exception:
                     pass
                 self._stream = None
+        finally:
+            self._stream_lock.release()
 
     def pause(self):
         self.listening = False

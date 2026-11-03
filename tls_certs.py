@@ -23,7 +23,8 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-CERT_DIR = PROJECT_ROOT / ".certs"
+_DATA_DIR_TLS = (os.getenv("JARVIS_DATA_DIR") or "").strip()
+CERT_DIR = (Path(_DATA_DIR_TLS).expanduser() / ".certs") if _DATA_DIR_TLS else (PROJECT_ROOT / ".certs")
 P12_PATH = CERT_DIR / "supplychain.p12"
 CA_PEM_PATH = CERT_DIR / "supplychain-ca.crt"
 PASS_PATH = CERT_DIR / "keystore.pass"

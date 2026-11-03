@@ -11,18 +11,28 @@ echo "배포 ZIP 생성: $OUT"
 zip -r "$OUT" . \
   -x "*.git*" \
   -x "*/.venv/*" \
+  -x "*/.venv-*/*" \
   -x "*/__pycache__/*" \
   -x "*/.env" \
   -x "*/.credentials/*" \
+  -x "*/.certs/*" \
   -x "*/.logs/*" \
   -x "*/audio_cache/*" \
   -x "*/faces/*" \
   -x "*/voice_profile/*" \
   -x "*/.idea/*" \
+  -x "*/.claude/*" \
   -x "*/.DS_Store" \
   -x "*/supply-chain-agent/target/*" \
   -x "*/.mplcache/*" \
   -x "*/portfolio.json" \
+  -x "*/data/accounts.json" \
+  -x "*/data/interests.json" \
+  -x "*/data/jarvis_memory.db" \
+  -x "*/.jarvis_link_token" \
+  -x "*/.jarvis_path" \
+  -x "*/hud_dump/*" \
+  -x "*/dist/*" \
   -x "*/test.mp3"
 
 echo "✓ $OUT"

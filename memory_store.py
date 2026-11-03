@@ -30,7 +30,9 @@ def memory_db_path() -> Path:
     raw = os.getenv("JARVIS_MEMORY_DB", "data/jarvis_memory.db").strip()
     p = Path(raw)
     if not p.is_absolute():
-        p = Path(__file__).resolve().parent / p
+        dd = (os.getenv("JARVIS_DATA_DIR") or "").strip()
+        base = Path(dd).expanduser() if dd else Path(__file__).resolve().parent
+        p = base / p
     return p
 
 

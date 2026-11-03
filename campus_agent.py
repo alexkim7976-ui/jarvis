@@ -227,10 +227,10 @@ class CampusAgent:
         _log("OK", f"감시 시작 — 간격={self.interval}초 | 조회범위={CAMPUS_LOOKBACK_DAYS}일"
                  f" | 수신={campus_mail_account()}")
 
-    def stop(self):
+    def stop(self, timeout: float = 0.25):
         self._running = False
-        if self._thread:
-            self._thread.join(timeout=5)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
 
     # ── 이벤트 큐 인터페이스 (stock_monitor 호환) ──
     def get_events(self) -> list[dict]:

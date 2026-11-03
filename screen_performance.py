@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import cv2
 
-from korean_font import put_text
+from korean_font import put_text, blend_rect
 from performance_presets import (
     PRESET_BALANCED,
     PRESET_ECO,
@@ -23,9 +23,10 @@ _ORDER = (PRESET_ECO, PRESET_BALANCED, PRESET_QUALITY)
 
 
 def draw_performance_panel(frame, visible: bool):
+    from i18n import tr
     h, w = frame.shape[:2]
     if not visible:
-        put_text(frame, "P  Perf", (min(380, max(16, w - 200)), 36), size=14, color=_DIM)
+        put_text(frame, tr("perf_button"), (min(380, max(16, w - 200)), 36), size=14, color=_DIM)
         return frame
 
     cur = current_profile()
@@ -34,11 +35,9 @@ def draw_performance_panel(frame, visible: bool):
         x = 16
     pw = min(320, w - x - 12)
     ph = min(200, h - y - 80)
-    ov = frame.copy()
-    cv2.rectangle(ov, (x, y), (x + pw, y + ph), _PANEL, -1)
-    cv2.addWeighted(ov, 0.86, frame, 0.14, 0, frame)
+    blend_rect(frame, x, y, x + pw, y + ph, _PANEL, 0.86)
     cv2.rectangle(frame, (x, y), (x + pw, y + ph), _CYAN, 1, cv2.LINE_AA)
-    put_text(frame, "Performance Profile", (x + 14, y + 26), size=17, color=_CYAN, bold=True)
+    put_text(frame, tr("perf_title"), (x + 14, y + 26), size=17, color=_CYAN, bold=True)
     ly = y + 52
     for i, pid in enumerate(_ORDER, start=1):
         label = PRESET_LABELS[pid]
@@ -46,8 +45,8 @@ def draw_performance_panel(frame, visible: bool):
         col = _ACTIVE if pid == cur else _IDLE
         put_text(frame, f"{i}  {mark} {label}", (x + 14, ly), size=15, color=col)
         ly += 26
-    put_text(frame, "1 Eco   2 Balanced   3 High Quality", (x + 14, ly + 4), size=12, color=_DIM)
-    put_text(frame, "Restart JARVIS to fully apply cam/STT", (x + 14, ly + 24), size=11, color=_DIM)
+    put_text(frame, tr("perf_hint"), (x + 14, ly + 4), size=12, color=_DIM)
+    put_text(frame, tr("perf_restart_hint"), (x + 14, ly + 24), size=11, color=_DIM)
     return frame
 
 

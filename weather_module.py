@@ -28,7 +28,9 @@ _USER_LOC_FILE = Path(os.getenv("JARVIS_USER_LOCATION_FILE", "data/user_location
 def _user_loc_path() -> Path:
     p = _USER_LOC_FILE
     if not p.is_absolute():
-        p = Path(__file__).resolve().parent / p
+        dd = (os.getenv("JARVIS_DATA_DIR") or "").strip()
+        base = Path(dd).expanduser() if dd else Path(__file__).resolve().parent
+        p = base / p
     return p
 
 
@@ -133,12 +135,14 @@ def _fast_boot_enabled() -> bool:
 
 def build_fast_startup_greeting() -> str:
     """Immediate greeting — local system time without waiting for network/GPS."""
+    from i18n import tr
     greet, time_str, label = local_time_greeting(None)
-    return f"{greet}. The local time is {time_str}."
+    return tr("fast_greeting_tpl", greet=greet, time_str=time_str)
 
 
 def build_location_weather_followup(*, try_gps: bool = True) -> str:
     """Location and local time follow-up after fast greeting."""
+    from i18n import tr
     loc = None
     if try_gps and device_location_enabled():
         try:
@@ -159,8 +163,7 @@ def build_location_weather_followup(*, try_gps: bool = True) -> str:
     parts: list[str] = []
     where = format_where_from_loc(loc) if loc else ""
     if where:
-        parts.append(f"Your current location is {where}.")
-        parts.append(f"The local time is {time_str}.")
+        parts.append(tr("location_followup_tpl", where=where, time_str=time_str))
         if weather_api_enabled() and WEATHER_API_KEY:
             city = (loc.get("city") or loc.get("region") or "").strip()
             if city:
@@ -172,20 +175,19 @@ def build_location_weather_followup(*, try_gps: bool = True) -> str:
 
 def build_auto_startup_briefing() -> str:
     """Boot greeting — auto-detected location + local time."""
+    from i18n import tr
     loc = resolve_auto_location(refresh=True)
     greet, time_str, label = local_time_greeting(loc.get("offset") if loc else None)
     parts: list[str] = [f"{greet}."]
     where = format_where_from_loc(loc) if loc else ""
     if where:
-        parts.append(f"Your current location is {where}.")
-        parts.append(f"The local time is {time_str}.")
+        parts.append(tr("location_followup_tpl", where=where, time_str=time_str))
         if weather_api_enabled() and WEATHER_API_KEY:
             city = (loc.get("city") or loc.get("region") or "").strip()
             if city:
                 parts.append(format_weather_line(city))
     else:
-        parts.append(f"I could not automatically determine your location. The local time is {time_str}.")
-        parts.append("Please check Location Services and JARVIS location permissions in System Settings.")
+        parts.append(tr("location_unknown_tpl", time_str=time_str))
     return " ".join(parts)
 
 
@@ -293,16 +295,17 @@ def get_device_location(*, timeout: float | None = None):
 
 
 def local_time_greeting(offset_seconds=None):
-    """Return (greeting, time_string, period_label) in English."""
+    """Return (greeting, time_string, period_label) in the active language."""
+    from i18n import tr
     if offset_seconds is None:
         now = datetime.now()
     else:
         now = datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)
     h = now.hour
-    if   5 <= h < 12:  greet, label = "Good morning", "morning"
-    elif 12 <= h < 17: greet, label = "Good afternoon", "afternoon"
-    elif 17 <= h < 22: greet, label = "Good evening", "evening"
-    else:              greet, label = "Good evening", "night"
+    if   5 <= h < 12:  greet, label = tr("greet_morning"), "morning"
+    elif 12 <= h < 17: greet, label = tr("greet_afternoon"), "afternoon"
+    elif 17 <= h < 22: greet, label = tr("greet_evening"), "evening"
+    else:              greet, label = tr("greet_evening"), "night"
     ampm = "AM" if h < 12 else "PM"
     h12 = h % 12 or 12
     return greet, f"{h12}:{now.minute:02d} {ampm}", label

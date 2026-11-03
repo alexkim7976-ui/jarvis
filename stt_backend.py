@@ -82,12 +82,35 @@ def should_preload_local_whisper() -> bool:
 
 
 def _stt_lang() -> str:
-    raw = (os.getenv("JARVIS_STT_LANG") or os.getenv("JARVIS_LANG") or "en").strip().lower()
-    if raw.startswith("en"):
+    raw = (os.getenv("JARVIS_STT_LANG") or os.getenv("JARVIS_LANG") or "").strip().lower()
+    if raw:
+        try:
+            from i18n import normalize_lang
+            return normalize_lang(raw)
+        except Exception:
+            for code in ("en", "zh", "ko", "ja", "es"):
+                if raw.startswith(code):
+                    return code
+            return raw
+    try:
+        from i18n import get_lang_meta
+        return str(get_lang_meta()["stt_lang"])
+    except Exception:
         return "en"
-    if raw.startswith("ko"):
-        return "ko"
-    return raw or "en"
+
+
+def _load_wav_float32(wav_path: str):
+    """16kHz 16-bit mono WAV 파일을 numpy float32 배열로 직접 읽어 PyAV(av.open metadata_errors) 호환성 오류를 우회하고 디코딩 속도를 높인다."""
+    try:
+        import wave
+        import numpy as np
+        with wave.open(wav_path, "rb") as wf:
+            if wf.getnchannels() == 1 and wf.getsampwidth() == 2 and wf.getframerate() == 16000:
+                raw = wf.readframes(wf.getnframes())
+                return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    except Exception:
+        pass
+    return wav_path
 
 
 def _worker_init():
@@ -107,7 +130,8 @@ def _worker_transcribe(wav_path: str, language: str | None = None) -> str:
     if _worker_model is None:
         _worker_init()
     lang = language or _stt_lang()
-    segments, _ = _worker_model.transcribe(wav_path, language=lang)
+    audio_in = _load_wav_float32(wav_path)
+    segments, _ = _worker_model.transcribe(audio_in, language=lang, beam_size=1, condition_on_previous_text=False)
     return " ".join(seg.text.strip() for seg in segments).strip()
 
 
@@ -132,10 +156,19 @@ def shutdown_process_pool() -> None:
     with _pool_lock:
         for pool in (_process_pool, _wake_process_pool):
             if pool is not None:
+                procs = getattr(pool, "_processes", None) or {}
                 try:
                     pool.shutdown(wait=False, cancel_futures=True)
                 except TypeError:
                     pool.shutdown(wait=False)
+                except Exception:
+                    pass
+                for p in list(procs.values()):
+                    try:
+                        if p is not None and p.is_alive():
+                            p.terminate()
+                    except Exception:
+                        pass
         _process_pool = None
         _wake_process_pool = None
 
@@ -170,16 +203,20 @@ def transcribe_audio_api(wav_path: str, client, language: str | None = None) -> 
 
 
 def transcribe_audio_local(wav_path: str, *, role: str = "main", language: str | None = None) -> str:
+    import time as _time
     from whisper_pool import get_whisper_model, invalidate_mlx_repo, _mlx_repo, _resolve_size
 
     lang = language or _stt_lang()
     for attempt in range(2):
         try:
+            t0 = _time.perf_counter()
             model = get_whisper_model(role=role)
-            segments, _ = model.transcribe(wav_path, language=lang)
+            audio_in = _load_wav_float32(wav_path)
+            segments, _ = model.transcribe(audio_in, language=lang, beam_size=1, condition_on_previous_text=False)
             text = " ".join(seg.text.strip() for seg in segments).strip()
+            dt_ms = (_time.perf_counter() - t0) * 1000
             if text:
-                _log("OK", f"Local transcript: {text}")
+                _log("OK", f"Local transcript ({dt_ms:.0f}ms): {text}")
             return text
         except Exception as e:
             if attempt == 0:
@@ -304,8 +341,9 @@ def transcribe_wake_clip(
     try:
         from whisper_pool import get_whisper_model
         model = get_whisper_model(role="wake")
+        audio_in = _load_wav_float32(wav_path)
         segments, _ = model.transcribe(
-            wav_path, language=lang, beam_size=1, condition_on_previous_text=False,
+            audio_in, language=lang, beam_size=1, condition_on_previous_text=False,
         )
         text = " ".join(seg.text.strip() for seg in segments).strip().lower()
         if not text:

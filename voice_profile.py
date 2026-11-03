@@ -35,7 +35,8 @@ import pyaudio
 #  설정 — 프로젝트 루트 기준 절대 경로 (앱/터미널 cwd 무관)
 # ──────────────────────────────────────────────
 _PROJECT_ROOT = Path(__file__).resolve().parent
-VOICE_DIR = Path(os.getenv("JARVIS_VOICE_PROFILE_DIR", str(_PROJECT_ROOT / "voice_profile")))
+_DATA_ROOT = Path(os.getenv("JARVIS_DATA_DIR") or _PROJECT_ROOT).expanduser()
+VOICE_DIR = Path(os.getenv("JARVIS_VOICE_PROFILE_DIR", str(_DATA_ROOT / "voice_profile")))
 VOICE_DIR.mkdir(parents=True, exist_ok=True)
 try:
     os.chmod(str(VOICE_DIR), 0o700)

@@ -1,35 +1,42 @@
 """
-J.A.R.V.I.S — Voice Output Style (Natural, Calm, Articulate English)
+J.A.R.V.I.S — Voice Output Style (Multi-Language: EN / 中文 / 한국어 / 日本語 / Español)
 """
 from __future__ import annotations
 
 import os
 import re
 
-_raw_user_name = (os.getenv("JARVIS_USER_NAME") or "Sir").strip() or "Sir"
-USER_DISPLAY_NAME = "Sir" if _raw_user_name in ("사용자", "김태현") else _raw_user_name
-
-USER_NAME_RULES = f"""
-- User's preferred form of address: {USER_DISPLAY_NAME}. When addressing the user, use "{USER_DISPLAY_NAME}".
-- Do NOT use "Tony", "선생님", or Korean honorifics.
-"""
-
-VOICE_STYLE_INSTRUCTIONS = f"""
-English Voice Output Rules (MUST follow for all replies):
-- ALWAYS respond in natural, calm, articulate **English** in the style of J.A.R.V.I.S., even if the user speaks or types in Korean or another language.
-- Never output Korean sentences or Korean words in your spoken response. Translate any Korean company names, data, or tool outputs into natural English.
-- Keep responses concise and conversational: 2 to 4 short sentences suitable for text-to-speech.
-- Speak numbers naturally for voice (e.g., "about seventy-two thousand won" or "roughly three percent").
-- Address the user as "{USER_DISPLAY_NAME}" at most once per response.
-- Do NOT read out numbered lists, bullet points, markdown formatting, raw JSON, function names, or code identifiers.
-"""
-
-ACK_PHRASES = (
-    "Right away, Sir.",
-    "One moment, please.",
-    "Checking on that now.",
-    "Certainly. Let me take a look.",
+from i18n import (
+    LANGUAGE_META,
+    build_language_directive,
+    get_ack_phrases,
+    get_lang,
+    get_lang_meta,
 )
+
+
+def _compute_display_name() -> str:
+    meta = get_lang_meta()
+    raw = (os.getenv("JARVIS_USER_NAME") or "").strip()
+    default_titles = {m["default_honorific"] for m in LANGUAGE_META.values()} | {"사용자", "User", ""}
+    if not raw or raw in default_titles:
+        return str(meta["default_honorific"])
+    return raw
+
+
+USER_DISPLAY_NAME = _compute_display_name()
+USER_NAME_RULES = f"- User's preferred form of address: {USER_DISPLAY_NAME}.\n"
+VOICE_STYLE_INSTRUCTIONS = build_language_directive()
+ACK_PHRASES = get_ack_phrases()
+
+
+def refresh_language_style() -> None:
+    """Recompute module-level language style constants after set_lang()."""
+    global USER_DISPLAY_NAME, USER_NAME_RULES, VOICE_STYLE_INSTRUCTIONS, ACK_PHRASES
+    USER_DISPLAY_NAME = _compute_display_name()
+    USER_NAME_RULES = f"- User's preferred form of address: {USER_DISPLAY_NAME}.\n"
+    VOICE_STYLE_INSTRUCTIONS = build_language_directive(user_name=USER_DISPLAY_NAME)
+    ACK_PHRASES = get_ack_phrases()
 
 _STIFF_REPLACEMENTS = (
     (r"verify_stock_indicators[^\s,.]*", "indicators"),
@@ -162,7 +169,7 @@ def normalize_user_address(text: str) -> str:
     """토니·선생님 같은 잘못된 호칭 → 로그인한 이름."""
     if not text or not str(text).strip():
         return text or ""
-    name = USER_DISPLAY_NAME
+    name = _compute_display_name()
     t = str(text)
     t = re.sub(r"토니(?=[,，.\s]|$)", name, t)
     t = re.sub(r"Tony(?=[,，.\s]|$)", name, t, flags=re.I)
@@ -174,7 +181,7 @@ def normalize_user_address(text: str) -> str:
 def with_user_address(msg: str, *, comma: bool = True) -> str:
     """메시지 앞에 사용자 이름을 붙인다 (이미 있으면 정규화만)."""
     msg = (msg or "").strip()
-    name = USER_DISPLAY_NAME
+    name = _compute_display_name()
     if msg.startswith(name):
         return normalize_user_address(msg)
     sep = ", " if comma else " "
